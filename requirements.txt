@@ -1,0 +1,21 @@
+# --- UI ---
+streamlit>=1.30
+
+# --- LLM inference ---
+groq>=0.11
+python-dotenv>=1.0
+
+# --- Agentic orchestration ---
+langgraph>=0.2
+
+# --- RAG: embeddings + vector search ---
+sentence-transformers>=3.0
+faiss-cpu>=1.8
+torch>=2.0
+numpy>=1.24
+
+# --- Document processing ---
+pymupdf>=1.24
+
+# --- Academic search APIs ---
+requests>=2.31

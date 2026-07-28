@@ -1,0 +1,50 @@
+# === SECRETS — never commit these ===
+.env
+.env.local
+*.key
+secrets.*
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# === Virtual environments ===
+venv/
+env/
+ENV/
+.venv/
+
+# === Streamlit ===
+.streamlit/secrets.toml
+
+# === Model / index caches ===
+*.faiss
+*.index
+.cache/
+models/
+sentence_transformers_cache/
+
+# === Uploads & temp artifacts ===
+temp_*.png
+uploads/
+tmp/
+*.tmp
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Notebooks ===
+.ipynb_checkpoints/
