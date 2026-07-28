@@ -138,7 +138,7 @@ flowchart LR
 
 ```bash
 # 1. Clone
-git clone https://github.com/<your-username>/ScholarAI.git
+git clone https://github.com/Agastya51/ScholarAI.git
 cd ScholarAI
 
 # 2. Virtual environment
