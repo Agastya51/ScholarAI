@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Related work · ScholarAI{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Related work</h1>
+  <p>Searches arXiv, Semantic Scholar, OpenAlex and CrossRef, keeps only the papers that are actually on topic
+    (rewording the search if too few are), then compares them with yours.</p>
+</header>
+
+<div id="noPaper" class="panel empty hidden">
+  <h2>No paper open</h2>
+  <p>Upload a paper to find work related to it.</p>
+  <a class="btn btn-primary" href="/">Upload a paper</a>
+</div>
+
+<div id="mainContent">
+  <form class="panel" id="searchForm">
+    <label class="label" for="topicInput">Search keywords (taken from your paper; edit them if they miss the point)</label>
+    <div class="row">
+      <input type="text" id="topicInput" class="field" style="flex:1;min-width:220px"/>
+      <button class="btn btn-primary" id="compareBtn" type="submit">Find related papers</button>
+    </div>
+    <div id="compareStatus" style="margin-top:10px"></div>
+  </form>
+
+  <div id="resultsSection" class="hidden">
+    <h2 class="section">How your paper compares</h2>
+    <div class="panel">
+      <div id="comparisonOutput" class="prose"></div>
+      <p id="queriesTried" class="hint" style="margin-top:14px"></p>
+      <div id="compareTrace"></div>
+    </div>
+
+    <h2 class="section" id="papersHead">Papers found</h2>
+    <div id="papersList"></div>
+
+    <div class="row end" style="margin-top:24px">
+      <a class="btn" href="/review">Peer review</a>
+      <a class="btn btn-primary" href="/improve">Improve the writing</a>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  async function runComparison() {
+    const topic = $("topicInput").value.trim();
+    if (!topic) { say("compareStatus", "bad", "Type a few keywords first."); return; }
+    setBtn("compareBtn", true, "Searching four databases…");
+    say("compareStatus", "", "");
+    try {
+      const data = await postJSON("/compare", { summary: SS.str("summary"), topic });
+      SS.set("comparison", data.comparison);
+      SS.set("papers", data.papers || []);
+      SS.set("compareRun", { queries: data.queries_tried || [], trace: data.trace || [], calls: data.llm_calls });
+      showResults();
+    } catch (e) {
+      say("compareStatus", "bad", e.message);
+    }
+    setBtn("compareBtn", false, "Find related papers");
+  }
+
+  function showResults() {
+    const papers = SS.get("papers") || [];
+    $("comparisonOutput").innerHTML = md(SS.str("comparison"));
+    const run = SS.get("compareRun");
+    if (run) {
+      $("queriesTried").textContent = run.queries.length > 1 ? `Searches tried, in order: ${run.queries.join("  then  ")}` : "";
+      $("compareTrace").innerHTML = renderTrace(run.trace, run.calls);
+    }
+    $("papersHead").textContent = papers.length ? `${plural(papers.length, "paper")} found` : "No related papers found";
+    $("papersList").innerHTML = papers.map(p => {
+      const meta = [p.year, p.venue, p.doi ? "DOI " + p.doi : ""].filter(Boolean).map(esc).join(", ");
+      const abstract = p.summary ? esc(p.summary.slice(0, 320)) + (p.summary.length > 320 ? "…" : "") : "No abstract available.";
+      const link = /^https?:\/\//.test(p.link || "") ? p.link : "#";
+      return `<article class="item">
+        <a class="item-title" href="${esc(link)}" target="_blank" rel="noopener">${esc(p.title)}</a>
+        <p class="hint">${meta}</p>
+        <p class="muted" style="margin-top:4px;max-width:80ch">${abstract}</p>
+      </article>`;
+    }).join("") || `<p class="muted">Try broader or different keywords above.</p>`;
+    $("resultsSection").classList.remove("hidden");
+  }
+
+  $("searchForm").addEventListener("submit", e => { e.preventDefault(); runComparison(); });
+  if (requirePaper()) {
+    $("topicInput").value = SS.str("topic");
+    if (SS.str("comparison")) showResults();
+  }
+</script>
+{% endblock %}

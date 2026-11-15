@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Figures · ScholarAI{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Figures, explained in context</h1>
+  <p>Each explanation is written from three things together: the picture, its caption, and every sentence of the
+    paper that talks about the figure, wherever those sentences are.</p>
+</header>
+
+<div id="noPaper" class="panel empty hidden">
+  <h2>No paper open</h2>
+  <p>Upload a paper to see its figures here.</p>
+  <a class="btn btn-primary" href="/">Upload a paper</a>
+</div>
+
+<div id="mainContent">
+  <div id="figList"><div class="working"><span class="spinner"></span> Loading figures…</div></div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  let figures = [];
+
+  function mentionsHtml(f) {
+    if (!f.mentions || !f.mentions.length)
+      return `<p class="hint" style="margin-top:10px">The text never refers to this figure by number, so the explanation relies on the image and caption.</p>`;
+    return `<h3 class="sub" style="margin-top:16px">What the paper says about it</h3>` + f.mentions.map(m =>
+      `<div class="mention">${esc(m.text)} <button type="button" class="cite" data-page="${m.page}" data-quote="${esc(m.text.slice(0, 300))}" data-snippet="${esc(m.text)}">p. ${m.page}</button></div>`).join("");
+  }
+
+  function cardHtml(f) {
+    const title = f.label || "Unlabelled image";
+    const where = f.caption_page && f.caption_page !== f.page ? `, caption on page ${f.caption_page}` : "";
+    const explained = f.analysis
+      ? `<div class="prose">${md(f.analysis)}</div>` +
+        (f.mode === "text-only" ? `<div class="row" style="margin-top:8px"><span class="tag tag-warn">Written without seeing the image</span><button class="btn btn-small" data-explain="${esc(f.id)}" data-retry="1">Try again with the image</button></div>` : "")
+      : `<p class="muted">Not explained yet.</p><button class="btn btn-primary" data-explain="${esc(f.id)}" id="ex-${esc(f.id)}" style="margin-top:8px">Explain this figure</button>`;
+    return `<article class="figure-card" id="card-${esc(f.id)}">
+      <div>
+        <img class="figure-img" src="${esc(f.image_url)}" alt="${esc(title)}" loading="lazy" data-zoom="${esc(f.id)}" title="Show where this is in the paper"/>
+        <p class="figure-cap">${esc(f.caption || "No caption was found for this image.")}</p>
+        <p class="hint">${esc(title)} on <button type="button" class="cite" data-page="${f.page}" data-figure="${esc(f.id)}">p. ${f.page}</button>${esc(where)}</p>
+        ${mentionsHtml(f)}
+      </div>
+      <div>
+        <h2 class="section" style="margin-top:0">${esc(title)}</h2>
+        <div id="an-${esc(f.id)}">${explained}</div>
+        <div id="st-${esc(f.id)}" style="margin-top:8px"></div>
+        <form class="row" data-ask="${esc(f.id)}" style="margin-top:18px">
+          <input class="field" style="flex:1;min-width:180px" placeholder="Ask about this figure, e.g. which curve is the baseline?" aria-label="Question about ${esc(title)}"/>
+          <button class="btn" type="submit" id="askbtn-${esc(f.id)}">Ask</button>
+        </form>
+        <div id="qa-${esc(f.id)}" class="stack" style="margin-top:12px"></div>
+      </div>
+    </article>`;
+  }
+
+  function render() {
+    if (!figures.length) {
+      $("figList").innerHTML = `<div class="panel empty"><h2>No figures found</h2>
+        <p>This paper has no figure the parser could locate. Tables are still searchable from the Ask page.</p></div>`;
+      return;
+    }
+    $("figList").innerHTML = figures.map(cardHtml).join("");
+  }
+
+  async function explain(id, retry) {
+    const btn = document.querySelector(`[data-explain="${id}"]`);
+    if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> Looking at the figure…`; }
+    say("st-" + id, "", "");
+    try {
+      const data = await postJSON(`/api/figures/${encodeURIComponent(id)}/explain`, { retry: !!retry });
+      figures = figures.map(f => f.id === id ? data.figure : f);
+      SS.set("figures", figures);
+      $("card-" + id).outerHTML = cardHtml(data.figure);
+    } catch (e) {
+      say("st-" + id, "bad", e.message);
+      if (btn) { btn.disabled = false; btn.textContent = retry ? "Try again with the image" : "Explain this figure"; }
+    }
+  }
+
+  async function ask(id, form) {
+    const box = form.querySelector("input");
+    const q = box.value.trim();
+    if (!q) return;
+    setBtn("askbtn-" + id, true, "Looking…");
+    try {
+      const data = await postJSON(`/api/figures/${encodeURIComponent(id)}/ask`, { question: q });
+      $("qa-" + id).insertAdjacentHTML("afterbegin",
+        `<div><div class="turn-q">${esc(q)}</div><div class="prose turn-a">${md(data.answer)}</div>` +
+        (data.mode === "text-only" ? `<span class="tag tag-warn">Answered without seeing the image</span>` : "") + `</div>`);
+      box.value = "";
+    } catch (e) {
+      say("st-" + id, "bad", e.message);
+    }
+    setBtn("askbtn-" + id, false, "Ask");
+  }
+
+  document.addEventListener("click", e => {
+    const ex = e.target.closest("[data-explain]");
+    if (ex) explain(ex.dataset.explain, ex.dataset.retry);
+    const zoom = e.target.closest("[data-zoom]");
+    if (zoom) { const f = figures.find(x => x.id === zoom.dataset.zoom); if (f) openSource({ page: f.page, figure: f.id }); }
+  });
+  document.addEventListener("submit", e => {
+    const form = e.target.closest("[data-ask]");
+    if (form) { e.preventDefault(); ask(form.dataset.ask, form); }
+  });
+
+  if (requirePaper()) {
+    fetch("/api/figures").then(r => r.json()).then(data => {
+      figures = data.paper_id === SS.str("paper_id") ? data.figures : (SS.get("figures") || []);
+      render();
+    }).catch(() => { figures = SS.get("figures") || []; render(); });
+  }
+</script>
+{% endblock %}

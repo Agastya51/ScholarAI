@@ -1,0 +1,172 @@
+{
+  "description": "Question set for the SYNTHETIC sample paper in evals/sample/ (all of its content is invented). Use it to check that the evaluation scripts run; write or generate a set for your own paper to get meaningful numbers. expected_facts are short exact strings a correct answer must contain; answerable=false questions test that the system says the paper does not cover them.",
+  "paper": "evals/sample/sample_paper.pdf",
+  "questions": [
+    {
+      "question": "What mean absolute error does FlowNet-X reach on RiverCity-200 at the 60-minute horizon?",
+      "expected_facts": [
+        "3.17"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "By what relative percentage does FlowNet-X reduce the error of RecurNet on RiverCity-200?",
+      "expected_facts": [
+        "12.4%"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What is the MAE of FlowNet-X on the HarborBay-310 dataset?",
+      "expected_facts": [
+        "1.94"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "Which optimizer and initial learning rate are used to train FlowNet-X?",
+      "expected_facts": [
+        "Adam",
+        "0.001"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What batch size is used and for how many epochs does training run?",
+      "expected_facts": [
+        "64",
+        "100 epochs"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What dropout rate is applied after the attention block?",
+      "expected_facts": [
+        "0.3"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "How are the datasets split into training, validation and test data?",
+      "expected_facts": [
+        "70%",
+        "10%",
+        "20%"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What happens to the MAE on RiverCity-200 when the gate is removed?",
+      "expected_facts": [
+        "3.44"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What MAE is obtained when the attention block is removed entirely?",
+      "expected_facts": [
+        "3.52"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "How many parameters does FlowNet-X have?",
+      "expected_facts": [
+        "1.8 million"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "How long does one training epoch take for FlowNet-X and for RecurNet on RiverCity-200?",
+      "expected_facts": [
+        "41 seconds",
+        "127 seconds"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "How much faster is FlowNet-X to train than RecurNet?",
+      "expected_facts": [
+        "3.1 times"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What is the MAE of the historical average (HA) predictor on RiverCity-200?",
+      "expected_facts": [
+        "4.86"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What MAE does ConvGraph achieve on HarborBay-310?",
+      "expected_facts": [
+        "2.18"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "How does the memory cost of the attention block grow with the input window length?",
+      "expected_facts": [
+        "quadratically"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "Which baseline is the strongest on both datasets?",
+      "expected_facts": [
+        "WaveGraph"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "Which component is responsible for most of the improvement, and what is the error without it?",
+      "expected_facts": [
+        "3.44"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "How quickly does forecasting quality get worse further into the future compared with RecurNet: what is the gap at 15 and at 60 minutes?",
+      "expected_facts": [
+        "0.13",
+        "0.45"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What does Figure 1 show?",
+      "expected_facts": [
+        "residual fusion"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What is reference [3]?",
+      "expected_facts": [
+        "Hartwell"
+      ],
+      "answerable": true
+    },
+    {
+      "question": "What root mean squared error (RMSE) does FlowNet-X achieve on RiverCity-200?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "What weight decay value is used during training?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "What accuracy does FlowNet-X achieve on ImageNet?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "How many layers does the BERT baseline have?",
+      "expected_facts": [],
+      "answerable": false
+    }
+  ]
+}

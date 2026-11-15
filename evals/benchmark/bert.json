@@ -1,0 +1,108 @@
+{
+  "description": "Hand-written question set. Every expected fact was checked against the text of the arXiv version named in `paper`. Facts are short exact strings; a retrieved chunk counts as relevant when it contains one.",
+  "paper": "arXiv:1810.04805 (BERT)",
+  "questions": [
+    {
+      "question": "To what value does BERT push the GLUE score?",
+      "expected_facts": [
+        "80.5"
+      ]
+    },
+    {
+      "question": "What MultiNLI accuracy does BERT report?",
+      "expected_facts": [
+        "86.7"
+      ]
+    },
+    {
+      "question": "What Test F1 does BERT reach on SQuAD v1.1 and on SQuAD v2.0?",
+      "expected_facts": [
+        "93.2",
+        "83.1"
+      ]
+    },
+    {
+      "question": "How many parameters do the BASE and LARGE models have?",
+      "expected_facts": [
+        "110M",
+        "340M"
+      ]
+    },
+    {
+      "question": "What share of WordPiece tokens is masked for the masked language model?",
+      "expected_facts": [
+        "15%"
+      ]
+    },
+    {
+      "question": "How often is a chosen token replaced with the [MASK] token?",
+      "expected_facts": [
+        "80% of the time"
+      ]
+    },
+    {
+      "question": "How large is the WordPiece vocabulary?",
+      "expected_facts": [
+        "30,000"
+      ]
+    },
+    {
+      "question": "How many words are in BooksCorpus and in English Wikipedia?",
+      "expected_facts": [
+        "800M words",
+        "2,500M words"
+      ]
+    },
+    {
+      "question": "For how many steps is BERT pre-trained?",
+      "expected_facts": [
+        "1,000,000 steps"
+      ]
+    },
+    {
+      "question": "What batch size is used for pre-training?",
+      "expected_facts": [
+        "256 sequences"
+      ]
+    },
+    {
+      "question": "What learning rate does Adam use during pre-training?",
+      "expected_facts": [
+        "1e-4"
+      ]
+    },
+    {
+      "question": "How long did each pre-training run take?",
+      "expected_facts": [
+        "4 days"
+      ]
+    },
+    {
+      "question": "On how many Cloud TPUs was the LARGE model trained?",
+      "expected_facts": [
+        "16 Cloud TPUs"
+      ]
+    },
+    {
+      "question": "Which activation function is used instead of the standard relu?",
+      "expected_facts": [
+        "gelu"
+      ]
+    },
+    {
+      "question": "What BLEU score does BERT achieve on WMT 2014 English-to-German translation?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "What top-5 error does BERT achieve on the ImageNet test set?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "What learning rate does the RoBERTa baseline use?",
+      "expected_facts": [],
+      "answerable": false
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Ask · ScholarAI{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Ask the paper</h1>
+  <p>Answers are written only from passages found in the paper. Click a page reference to see the passage
+    highlighted on the page.</p>
+</header>
+
+<div id="noPaper" class="panel empty hidden">
+  <h2>No paper open</h2>
+  <p>Upload a paper, then come back to ask about it.</p>
+  <a class="btn btn-primary" href="/">Upload a paper</a>
+</div>
+
+<div id="mainContent">
+  <div id="startersBox">
+    <p class="muted" style="margin-bottom:10px">Some questions to start with:</p>
+    <div class="starters" id="starters"></div>
+  </div>
+
+  <div class="thread" id="thread" style="margin-top:22px"></div>
+
+  <div class="composer">
+    <form class="composer-box" id="askForm">
+      <input type="text" id="queryInput" placeholder="Ask anything about this paper" aria-label="Your question" autocomplete="off"/>
+      <div class="seg" title="Thorough: an agent that can read sections, tables and figures and search related papers. Quick: one search and one answer.">
+        <button type="button" data-mode="agent" class="active">Thorough</button>
+        <button type="button" data-mode="simple">Quick</button>
+      </div>
+      <button class="btn btn-primary" id="askBtn" type="submit">Ask</button>
+    </form>
+    <div class="row between" style="margin-top:8px">
+      <span class="hint">Follow-up questions remember the last few turns.</span>
+      <button class="btn btn-quiet btn-small hidden" id="clearBtn" type="button">Clear this conversation</button>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const GENERIC = ["What problem does this paper solve?", "What is the main result, with numbers?",
+                   "Which datasets and baselines are used?", "What limitations do the authors admit?"];
+  let mode = "agent";
+
+  function showStarters(list) {
+    $("starters").innerHTML = list.map(q => `<button type="button" class="starter">${esc(q)}</button>`).join("");
+  }
+
+  async function loadStarters() {
+    const saved = SS.get("starters");
+    if (saved && saved.length) { showStarters(saved); return; }
+    showStarters(GENERIC);
+    try {
+      const data = await postJSON("/api/suggest-questions", {});
+      if (data.questions && data.questions.length) { SS.set("starters", data.questions); showStarters(data.questions); }
+    } catch { /* the generic questions stay */ }
+  }
+
+  function turnHtml(h) {
+    const modeTag = h.mode ? `<span class="tag">${h.mode === "simple" ? "Quick answer" : "Thorough answer"}</span>` : "";
+    return `<article>
+      <div class="turn-q">${esc(h.q)}</div>
+      <div class="prose turn-a">${md(h.a)}</div>
+      <div class="turn-meta">${renderConfidence(h.retrieval)}${modeTag}</div>
+      ${renderSources(h.sources)}
+      ${renderTrace(h.trace, h.calls)}
+    </article>`;
+  }
+
+  function renderThread() {
+    const hist = SS.get("qaHistory") || [];
+    $("thread").innerHTML = hist.map(turnHtml).join("");
+    $("clearBtn").classList.toggle("hidden", !hist.length);
+    $("startersBox").classList.toggle("hidden", hist.length > 0);
+  }
+
+  async function ask(q) {
+    q = (q || $("queryInput").value).trim();
+    if (!q) return;
+    $("queryInput").value = "";
+    setBtn("askBtn", true, mode === "agent" ? "Reading…" : "Searching…");
+    $("startersBox").classList.add("hidden");
+    const pending = document.createElement("article");
+    pending.innerHTML = `<div class="turn-q">${esc(q)}</div><div class="working"><span class="spinner"></span> ${
+      mode === "agent" ? "Searching the paper, checking tables and figures if needed…" : "Finding the most relevant passages…"}</div>`;
+    $("thread").appendChild(pending);
+    pending.scrollIntoView({ block: "center" });
+    const hist = SS.get("qaHistory") || [];
+    try {
+      const data = await postJSON("/ask", { query: q, mode, history: hist.slice(-6).map(h => ({ q: h.q, a: h.a })) });
+      hist.push({ q, a: data.answer, sources: data.sources || [], trace: data.trace || [], calls: data.llm_calls,
+                  mode: data.mode, retrieval: data.retrieval || null });
+      SS.set("qaHistory", hist);
+      renderThread();
+      $("thread").lastElementChild.scrollIntoView({ block: "start" });
+    } catch (e) {
+      pending.innerHTML = `<div class="turn-q">${esc(q)}</div><p class="note note-bad" style="margin-top:10px">${esc(e.message)}</p>`;
+    }
+    setBtn("askBtn", false, "Ask");
+    $("queryInput").focus();
+  }
+
+  $("askForm").addEventListener("submit", e => { e.preventDefault(); ask(); });
+  $("starters").addEventListener("click", e => { if (e.target.classList.contains("starter")) ask(e.target.textContent); });
+  document.querySelectorAll("#askForm .seg button").forEach(b => b.addEventListener("click", () => {
+    mode = b.dataset.mode;
+    document.querySelectorAll("#askForm .seg button").forEach(o => o.classList.toggle("active", o === b));
+  }));
+  $("clearBtn").addEventListener("click", () => { SS.del("qaHistory"); renderThread(); });
+
+  if (requirePaper()) { renderThread(); loadStarters(); }
+</script>
+{% endblock %}

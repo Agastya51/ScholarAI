@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Compare papers · ScholarAI{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Compare several papers</h1>
+  <p>Add two to five papers. Each one is profiled separately, then laid side by side in a table with a written
+    synthesis of where they agree, differ and leave gaps.</p>
+</header>
+
+<div class="panel">
+  <label class="label" for="libFiles">Add papers (PDF)</label>
+  <div class="row">
+    <input type="file" id="libFiles" accept=".pdf,application/pdf" multiple class="field" style="flex:1;min-width:220px"/>
+    <button class="btn" id="addBtn">Add these papers</button>
+    <span id="addStatus"></span>
+  </div>
+
+  <h2 class="section" id="libCount">Your papers</h2>
+  <div id="libList"></div>
+</div>
+
+<div class="panel">
+  <label class="label" for="focusInput">What should the comparison focus on? (optional)</label>
+  <div class="row">
+    <input id="focusInput" class="field" style="flex:1;min-width:220px" placeholder="For example: training cost, datasets used, how each handles long sequences"/>
+    <button class="btn btn-primary" id="cmpBtn">Compare the ticked papers</button>
+  </div>
+  <div id="cmpStatus" style="margin-top:10px"></div>
+</div>
+
+<div id="cmpResults" class="hidden">
+  <h2 class="section">Side by side</h2>
+  <div id="matrixOut" class="prose wide"></div>
+  <h2 class="section">Synthesis</h2>
+  <div class="panel">
+    <div id="synthOut" class="prose"></div>
+    <div id="synthTrace"></div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  async function loadLibrary() {
+    try {
+      const data = await (await fetch("/papers")).json();
+      renderLibrary(data.papers || []);
+    } catch { $("libList").innerHTML = `<p class="note note-bad">Could not reach the server.</p>`; }
+  }
+
+  function renderLibrary(papers) {
+    $("libCount").textContent = papers.length ? `Your papers (${papers.length})` : "Your papers";
+    $("libList").innerHTML = papers.length ? papers.map(p => `
+      <div class="item row" style="flex-wrap:nowrap">
+        <input type="checkbox" class="paperChk" value="${esc(p.id)}" checked aria-label="Include ${esc(p.title || p.filename)}"/>
+        <div style="flex:1;min-width:0">
+          <div class="item-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.title || p.filename)}</div>
+          <div class="hint">${esc(p.filename)}, ${plural(p.figures, "figure")}, ${plural(p.tables, "table")}${p.has_profile ? ", already profiled" : ""}</div>
+        </div>
+        ${p.active ? '<span class="tag tag-hl">Open now</span>' : ""}
+        <button class="btn btn-small" data-remove="${esc(p.id)}">Remove</button>
+      </div>`).join("") : `<p class="muted">No papers yet. The paper you opened on the Overview page appears here too.</p>`;
+  }
+
+  async function addPapers() {
+    const files = [...$("libFiles").files];
+    if (!files.length) { say("addStatus", "bad", "Choose one or more PDF files first."); return; }
+    setBtn("addBtn", true, "Reading…");
+    try {
+      for (const [i, f] of files.entries()) {
+        say("addStatus", "pen", `Reading ${i + 1} of ${files.length}: ${f.name}`);
+        const form = new FormData();
+        form.append("file", f);
+        const res = await fetch("/papers", { method: "POST", body: form });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(friendlyError(data.error || `Server error (${res.status})`));
+        renderLibrary(data.papers);
+      }
+      say("addStatus", "ok", `Added ${plural(files.length, "paper")}`);
+      $("libFiles").value = "";
+    } catch (e) {
+      say("addStatus", "bad", e.message);
+    }
+    setBtn("addBtn", false, "Add these papers");
+  }
+
+  async function removePaper(id) {
+    const res = await fetch(`/papers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    renderLibrary((await res.json()).papers || []);
+    if (id === SS.str("paper_id")) { forgetPaper(); refreshNav(); }
+  }
+
+  async function runCompare() {
+    const ids = [...document.querySelectorAll(".paperChk:checked")].map(c => c.value);
+    if (ids.length < 2) { say("cmpStatus", "bad", "Tick at least two papers."); return; }
+    setBtn("cmpBtn", true, "Profiling each paper, then comparing…");
+    say("cmpStatus", "", "");
+    try {
+      const data = await postJSON("/multi-compare", { paper_ids: ids.slice(0, 5), focus: $("focusInput").value.trim() });
+      SS.set("multiCompare", data);
+      showCompare(data);
+      loadLibrary();
+    } catch (e) {
+      say("cmpStatus", "bad", e.message);
+    }
+    setBtn("cmpBtn", false, "Compare the ticked papers");
+  }
+
+  function showCompare(data) {
+    $("matrixOut").innerHTML = md(data.matrix);
+    $("synthOut").innerHTML = md(data.synthesis);
+    $("synthTrace").innerHTML = renderTrace(data.trace, data.llm_calls);
+    $("cmpResults").classList.remove("hidden");
+  }
+
+  $("addBtn").addEventListener("click", addPapers);
+  $("cmpBtn").addEventListener("click", runCompare);
+  $("libList").addEventListener("click", e => { if (e.target.dataset.remove) removePaper(e.target.dataset.remove); });
+  loadLibrary();
+  const savedCmp = SS.get("multiCompare");
+  if (savedCmp) showCompare(savedCmp);
+</script>
+{% endblock %}

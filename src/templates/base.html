@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{% block title %}ScholarAI{% endblock %}</title>
+  <script>
+    // Set the theme before the first paint so the page never flashes the wrong one
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem("theme"); } catch (e) {}
+      if (!t) t = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='5' width='22' height='22' rx='5' fill='%23ffe566' transform='rotate(-8 16 16)'/%3E%3C/svg%3E"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"/>
+  <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <a href="/" class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">ScholarAI</span></a>
+    <div class="reading" id="readingBox">No paper open yet</div>
+
+    <nav class="nav-group" aria-label="Read">
+      <div class="nav-title">Read</div>
+      <a href="/" class="nav-link {% if page=='upload' %}active{% endif %}">Overview</a>
+      <a href="/figures" class="nav-link {% if page=='figures' %}active{% endif %}">Figures</a>
+      <a href="/qa" class="nav-link {% if page=='qa' %}active{% endif %}">Ask</a>
+      <a href="/study" class="nav-link {% if page=='study' %}active{% endif %}">Study</a>
+    </nav>
+    <nav class="nav-group" aria-label="Critique">
+      <div class="nav-title">Critique</div>
+      <a href="/compare" class="nav-link {% if page=='compare' %}active{% endif %}">Related work</a>
+      <a href="/review" class="nav-link {% if page=='review' %}active{% endif %}">Peer review</a>
+      <a href="/improve" class="nav-link {% if page=='improve' %}active{% endif %}">Improve writing</a>
+      <a href="/analyze" class="nav-link {% if page=='analyze' %}active{% endif %}">Run everything</a>
+    </nav>
+    <nav class="nav-group" aria-label="More">
+      <div class="nav-title">More</div>
+      <a href="/library" class="nav-link {% if page=='library' %}active{% endif %}">Compare papers</a>
+      <a href="/download" class="nav-link {% if page=='download' %}active{% endif %}">Export</a>
+      <a href="/benchmarks" class="nav-link {% if page=='benchmarks' %}active{% endif %}">Benchmarks</a>
+    </nav>
+
+    <div class="side-foot">
+      <span>Answers cite the page they came from.</span>
+      <button class="icon-btn" onclick="toggleTheme()" title="Switch between light and dark" aria-label="Switch between light and dark">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="page {% block page_class %}{% endblock %}">
+      <div id="lostBanner" class="note note-warn banner hidden">
+        The server no longer has this paper (it forgets papers when it restarts or after a few idle hours).
+        <a href="/" onclick="forgetPaper()">Upload it again</a> to keep working.
+      </div>
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+</div>
+
+<!-- The real page of the paper, with the cited passage highlighted -->
+<div class="scrim" id="scrim" onclick="closeSource()"></div>
+<aside class="drawer" id="sourceDrawer" aria-label="Page of the paper">
+  <div class="drawer-head">
+    <b id="drawerTitle">Page</b>
+    <span class="hint" id="drawerNote" style="flex:1"></span>
+    <button class="btn btn-small" id="drawerPrev" onclick="stepViewer(-1)">Previous</button>
+    <button class="btn btn-small" id="drawerNext" onclick="stepViewer(1)">Next</button>
+    <button class="icon-btn" id="drawerClose" onclick="closeSource()" aria-label="Close the page viewer">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body">
+    <p class="drawer-quote hidden" id="drawerQuote"></p>
+    <img class="drawer-page" id="drawerPage" alt=""/>
+  </div>
+</aside>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>

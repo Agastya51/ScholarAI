@@ -1,0 +1,73 @@
+{
+  "description": "Template for 'Attention Is All You Need' (download the PDF from arXiv:1706.03762 yourself). Replace the questions with ones for the paper you evaluate, or draft them with `python -m evals.generate_dataset`. Keep expected_facts short, exact and distinctive (numbers with units, dataset or method names): a retrieved chunk counts as relevant when it contains one of them. Mark questions the paper cannot answer with \"answerable\": false.",
+  "paper": "Attention Is All You Need (Vaswani et al., 2017)",
+  "questions": [
+    {
+      "question": "What BLEU score does the big Transformer reach on WMT 2014 English-to-German?",
+      "expected_facts": [
+        "28.4"
+      ]
+    },
+    {
+      "question": "Which datasets are used for machine translation experiments?",
+      "expected_facts": [
+        "WMT 2014",
+        "English-German",
+        "English-French"
+      ]
+    },
+    {
+      "question": "How many attention heads does the base model use?",
+      "expected_facts": [
+        "8"
+      ]
+    },
+    {
+      "question": "What optimizer and warmup steps are used for training?",
+      "expected_facts": [
+        "Adam",
+        "4000"
+      ]
+    },
+    {
+      "question": "What is the dimensionality of the model (d_model) in the base configuration?",
+      "expected_facts": [
+        "512"
+      ]
+    },
+    {
+      "question": "How does the Transformer's training cost compare to previous state-of-the-art models?",
+      "expected_facts": [
+        "fraction of the training cost"
+      ]
+    },
+    {
+      "question": "What is the inner dimensionality of the position-wise feed-forward layers?",
+      "expected_facts": [
+        "2048"
+      ]
+    },
+    {
+      "question": "On what hardware were the models trained?",
+      "expected_facts": [
+        "P100"
+      ]
+    },
+    {
+      "question": "How long was the big model trained?",
+      "expected_facts": [
+        "3.5 days"
+      ]
+    },
+    {
+      "question": "What accuracy does the Transformer achieve on ImageNet?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "What perplexity does the Transformer reach on the WikiText-103 benchmark?",
+      "expected_facts": [],
+      "answerable": false
+    }
+  ]
+}

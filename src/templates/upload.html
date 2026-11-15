@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Overview · ScholarAI{% endblock %}
+{% block content %}
+
+<!-- No paper yet -->
+<section id="welcome">
+  <header class="page-head">
+    <h1>Upload a paper. Check every answer against the page.</h1>
+    <p>ScholarAI summarises a research paper, explains its figures, answers your questions and reviews it the way a
+      referee would. Each answer links to the page it came from, so you never have to take it on trust.</p>
+  </header>
+
+  <div class="drop" id="dropZone" tabindex="0" role="button" aria-label="Choose a PDF to upload">
+    <input type="file" id="fileInput" accept=".pdf,application/pdf" class="hidden"/>
+    <h2 id="fileLabel">Drop a PDF here</h2>
+    <p class="muted" id="fileHint">or click to choose a file. Up to {{ max_mb }} MB and {{ max_pages }} pages, with selectable text (not a scan).</p>
+  </div>
+  <div class="row" style="margin-top:16px">
+    <button class="btn btn-primary" id="uploadBtn" disabled>Read this paper</button>
+    <span id="uploadStatus"></span>
+  </div>
+  <p class="hint hidden" id="uploadWait" style="margin-top:10px">This usually takes under a minute. The paper is being parsed, indexed and summarised, and its first figures explained.</p>
+
+  <div class="promise">
+    <div><h3>Answers you can check</h3><p>Click any page reference to open that page of the PDF with the exact passage highlighted.</p></div>
+    <div><h3>Figures read in context</h3><p>Each figure is explained using its caption and every sentence of the paper that discusses it, even when they are pages apart.</p></div>
+    <div><h3>A critical second reader</h3><p>Claims are matched to quoted evidence, a review panel scores the paper, and rewrites are fact-checked against the original.</p></div>
+  </div>
+</section>
+
+<!-- Paper open -->
+<section id="overview" class="hidden">
+  <header class="page-head">
+    <h1 id="paperTitle"></h1>
+    <ul class="facts" id="paperFacts"></ul>
+  </header>
+
+  <div class="row between" style="margin-bottom:14px">
+    <div class="seg" id="levelSeg" role="tablist" aria-label="How to explain the paper">
+      <button class="active" data-level="summary">Summary</button>
+      <button data-level="simple">In plain words</button>
+      <button data-level="student">For a student</button>
+      <button data-level="expert">For an expert</button>
+    </div>
+    <div class="row">
+      <button class="btn btn-small" id="listenBtn">Listen</button>
+      <button class="btn btn-small" id="changeBtn">Open a different paper</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div id="summaryOut" class="prose"></div>
+    <div id="levelStatus"></div>
+    <div id="uploadTrace"></div>
+  </div>
+
+  <h2 class="section">Where to go next</h2>
+  <div class="next-list">
+    <a href="/figures"><b>Figures</b><span id="nextFigures">See each figure with its explanation</span></a>
+    <a href="/qa"><b>Ask</b><span>Question the paper and see the passages behind each answer</span></a>
+    <a href="/study"><b>Study</b><span>Claims with quoted evidence, key terms, flashcards and a quiz</span></a>
+    <a href="/compare"><b>Related work</b><span>Find recent papers on the same topic and compare</span></a>
+    <a href="/review"><b>Peer review</b><span>Four reviewers score the paper and list what to fix</span></a>
+    <a href="/improve"><b>Improve writing</b><span>Fact-checked rewrites of the weakest passages</span></a>
+  </div>
+</section>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  let selectedFile = null;
+  let current = "summary";
+  const drop = $("dropZone"), input = $("fileInput");
+
+  function showState() {
+    const open = hasPaper();
+    $("welcome").classList.toggle("hidden", open);
+    $("overview").classList.toggle("hidden", !open);
+    if (!open) return;
+    const st = SS.get("stats") || {};
+    $("paperTitle").textContent = SS.str("title") || "Your paper";
+    const facts = [[st.pages, "page"], [st.sections, "section"], [st.figures, "figure"], [st.tables, "table"], [st.references, "reference"]]
+      .filter(f => f[0]).map(f => `<li><b>${f[0]}</b> ${f[1]}${f[0] === 1 ? "" : "s"}</li>`);
+    if (SS.str("topic")) facts.push(`<li>Keywords: <b>${esc(SS.str("topic"))}</b></li>`);
+    $("paperFacts").innerHTML = facts.join("");
+    $("nextFigures").textContent = st.figures ? `${plural(st.figures, "figure")} found, each explained in context` : "No figures were found in this paper";
+    const tr = SS.get("uploadTrace");
+    $("uploadTrace").innerHTML = tr ? renderTrace(tr.trace, tr.calls) : "";
+    showLevel("summary");
+  }
+
+  async function showLevel(level) {
+    current = level;
+    document.querySelectorAll("#levelSeg button").forEach(b => b.classList.toggle("active", b.dataset.level === level));
+    say("levelStatus", "", "");
+    if (level === "summary") { $("summaryOut").innerHTML = md(SS.str("summary")); return; }
+    const cache = SS.get("explain") || {};
+    if (!cache[level]) {
+      $("summaryOut").innerHTML = `<div class="working"><span class="spinner"></span> Rewriting the explanation for this reader…</div>`;
+      try {
+        cache[level] = (await postJSON("/api/explain", { level })).text;
+        SS.set("explain", cache);
+      } catch (e) {
+        $("summaryOut").innerHTML = "";
+        say("levelStatus", "bad", e.message);
+        return;
+      }
+    }
+    if (current === level) $("summaryOut").innerHTML = md(cache[level]);
+  }
+
+  function setFile(f) {
+    if (!f) return;
+    if (!/\.pdf$/i.test(f.name)) { say("uploadStatus", "bad", "That file is not a PDF."); return; }
+    selectedFile = f;
+    $("fileLabel").textContent = f.name;
+    $("fileHint").textContent = `${(f.size / 1024 / 1024).toFixed(1)} MB. Click "Read this paper" to start.`;
+    $("uploadBtn").disabled = false;
+    say("uploadStatus", "", "");
+  }
+
+  async function uploadPaper() {
+    if (!selectedFile) return;
+    setBtn("uploadBtn", true, "Reading the paper…");
+    $("uploadWait").classList.remove("hidden");
+    say("uploadStatus", "", "");
+    const form = new FormData();
+    form.append("file", selectedFile);
+    try {
+      let res;
+      try { res = await fetch("/upload", { method: "POST", body: form }); }
+      catch { throw new Error("Could not reach the server. Check that it is running and try again."); }
+      let data;
+      try { data = await res.json(); } catch {
+        throw new Error(res.status === 502 || res.status === 504
+          ? "The server took too long and gave up. Try again, or use a shorter paper."
+          : `The server sent an unreadable reply (${res.status}).`);
+      }
+      if (!res.ok || data.error) throw new Error(friendlyError(data.error || `Server error (${res.status})`));
+
+      forgetPaper();                       // results that belonged to the previous paper
+      SS.set("paper_id", data.paper_id);
+      SS.set("title", data.title);
+      SS.set("stats", data.stats || {});
+      SS.set("uploadTrace", { trace: data.trace || [], calls: data.llm_calls });
+      SS.set("summary", data.summary);
+      SS.set("vision", data.vision || []);
+      SS.set("figures", data.figures || []);
+      SS.set("topic", data.topic);
+      selectedFile = null;
+      refreshNav();
+      showState();
+      window.scrollTo(0, 0);
+    } catch (e) {
+      say("uploadStatus", "bad", e.message);
+    }
+    setBtn("uploadBtn", false, "Read this paper");
+    $("uploadWait").classList.add("hidden");
+  }
+
+  drop.addEventListener("click", () => input.click());
+  drop.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); setFile(e.dataTransfer.files[0]); });
+  input.addEventListener("change", e => setFile(e.target.files[0]));
+  $("uploadBtn").addEventListener("click", uploadPaper);
+  $("levelSeg").addEventListener("click", e => { if (e.target.dataset.level) showLevel(e.target.dataset.level); });
+  $("listenBtn").addEventListener("click", e => listen(e.target, $("summaryOut").innerText));
+  $("changeBtn").addEventListener("click", () => {
+    $("overview").classList.add("hidden");
+    $("welcome").classList.remove("hidden");
+  });
+
+  showState();
+</script>
+{% endblock %}

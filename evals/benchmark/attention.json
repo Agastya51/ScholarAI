@@ -1,0 +1,107 @@
+{
+  "description": "Hand-written question set. Every expected fact was checked against the text of the arXiv version named in `paper`. Facts are short exact strings; a retrieved chunk counts as relevant when it contains one.",
+  "paper": "arXiv:1706.03762 (Attention Is All You Need)",
+  "questions": [
+    {
+      "question": "What BLEU score does the big Transformer reach on WMT 2014 English-to-German?",
+      "expected_facts": [
+        "28.4"
+      ]
+    },
+    {
+      "question": "What single-model BLEU score is reported for WMT 2014 English-to-French?",
+      "expected_facts": [
+        "41.8"
+      ]
+    },
+    {
+      "question": "How long did the big model train, and on what hardware?",
+      "expected_facts": [
+        "3.5 days",
+        "P100"
+      ]
+    },
+    {
+      "question": "For how many steps and how many hours were the base models trained?",
+      "expected_facts": [
+        "100,000 steps",
+        "12 hours"
+      ]
+    },
+    {
+      "question": "How many warmup steps does the learning rate schedule use?",
+      "expected_facts": [
+        "4000"
+      ]
+    },
+    {
+      "question": "What value of beta2 is used for the Adam optimizer?",
+      "expected_facts": [
+        "0.98"
+      ]
+    },
+    {
+      "question": "How large is the shared byte-pair vocabulary for English-German?",
+      "expected_facts": [
+        "37000"
+      ]
+    },
+    {
+      "question": "How many sentence pairs are in the WMT 2014 English-German training data?",
+      "expected_facts": [
+        "4.5 million"
+      ]
+    },
+    {
+      "question": "What is the inner dimensionality of the position-wise feed-forward layers?",
+      "expected_facts": [
+        "2048"
+      ]
+    },
+    {
+      "question": "Which treebank is used for the English constituency parsing experiments?",
+      "expected_facts": [
+        "Penn Treebank"
+      ]
+    },
+    {
+      "question": "What F1 does the 4-layer Transformer reach on WSJ section 23 in the semi-supervised setting?",
+      "expected_facts": [
+        "92.7"
+      ]
+    },
+    {
+      "question": "What replaces sinusoidal positional encoding in row (E) of the model variations?",
+      "expected_facts": [
+        "learned positional embeddings"
+      ]
+    },
+    {
+      "question": "How many source tokens does each training batch contain approximately?",
+      "expected_facts": [
+        "25000"
+      ]
+    },
+    {
+      "question": "Where is the code for training and evaluating the models available?",
+      "expected_facts": [
+        "tensor2tensor"
+      ]
+    },
+    {
+      "question": "What top-1 accuracy does the Transformer achieve on ImageNet?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "What perplexity does the Transformer reach on the WikiText-103 benchmark?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "How many layers does the BERT baseline have in this paper?",
+      "expected_facts": [],
+      "answerable": false
+    }
+  ]
+}

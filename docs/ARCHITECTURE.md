@@ -1,197 +1,140 @@
 # ScholarAI — Architecture
 
-A technical walkthrough of how the system is put together. For the high-level pitch, see the [README](../README.md); for the full academic treatment, see [BTP_Report.pdf](BTP_Report.pdf).
+How the system is put together. For the overview see the [README](../README.md); for the full academic treatment see [BTP_Report.pdf](BTP_Report.pdf). File paths below are relative to the repository root.
 
 ---
 
 ## 1. Design principles
 
-**Separation of concerns.** Configuration, document processing, workflow orchestration, academic search and UI live in five separate modules that communicate only through public function signatures. No module reaches into another's internals, so each can be tested or swapped independently.
+**Every answer must be checkable.** Retrieved passages keep their page and section, answers cite them as `[p. N]`, and the interface turns each citation into a rendered page of the original PDF with the passage highlighted. Quotes produced by the model are matched against the paper text without an LLM.
 
-**Stateful workflow orchestration.** Rather than one monolithic analysis function, each step is a named node on a directed graph. A shared `PaperState` dict flows through the graph, accumulating results. Adding a step means adding a node and an edge — the execution path stays inspectable and each node is debuggable in isolation.
+**A figure is read together with its text.** A figure, its caption and the sentences that discuss it are joined before any model sees the figure, even when they sit on different pages.
 
-**Graceful degradation.** Cloud LLM endpoints rate-limit under load. The LLM interface has an automatic two-tier fallback so a `429` or `413` from the primary model doesn't surface as an error to the user.
+**Retrieval quality is measured, not assumed.** Each retrieval idea (BM25, dense, fusion, MMR, thresholds, query expansion, reranking) can be switched on and off and is scored by the evaluation scripts in `evals/`.
 
-**Local vector search.** RAG runs entirely against a local FAISS index. Unpublished manuscripts never touch a hosted vector database, and retrieval latency is sub-millisecond.
+**Agents are bounded.** Tool loops, self-correcting searches and fact-check loops all have iteration caps, and every request has a budget of LLM calls (`MAX_LLM_CALLS_PER_RUN`, `MAX_LLM_CALLS_ANALYZE`), so a loop cannot exhaust the Groq rate limit.
 
-**Multi-source retrieval.** Comparative analysis queries four academic databases with different coverage footprints, then merges and deduplicates, so results hold up across disciplines.
+**Graceful degradation.** A `429` from the primary model falls back to a second model; if the vision model is unavailable a figure is explained from its caption and in-text mentions and labelled as such; if query expansion fails, retrieval continues without it.
+
+**Small footprint.** The app runs on a 512 MB instance: ONNX embeddings (FastEmbed), a single gunicorn worker, embeddings cached on disk by content hash, and bounded per-session memory.
 
 ---
 
-## 2. Layered structure
+## 2. Layers
 
 | Layer | Responsibility | Files |
 | --- | --- | --- |
-| **1 — Interface** | Streamlit app: sidebar upload, five tabs, session-state caching of every generated result | `app.py` |
-| **2 — Core processing** | Model config, PDF parsing, chunking, embedding, FAISS index, the `llm()` routing wrapper, context distillation | `config.py`, `utils.py` |
-| **3 — Orchestration** | Four compiled LangGraph DAGs and their nodes | `graphs.py` |
-| **4 — External services** | Groq inference, four academic APIs, local FAISS storage and temp image assets | `api_search.py` + service calls |
-
-Session state is the thing that makes the UI feel fast: parsed text, chunk vectors, the FAISS index object, retrieved papers and each comparison section are all cached, so switching tabs never re-triggers an LLM call or an API round-trip.
+| **Interface** | Flask routes, per-browser sessions, upload validation, server-sent events for live agent runs; HTML pages with shared CSS/JS (fonts and libraries bundled) | `src/app.py`, `src/templates/`, `src/static/` |
+| **Document understanding** | Layout-aware parsing, sections, tables, captions, references, figure regions, in-text mentions, page rendering with highlights | `src/rag.py`, `src/figures.py`, `src/viewer.py` |
+| **Retrieval** | Hybrid index (FAISS + BM25), fusion, MMR, thresholds, query expansion, reranking, confidence and grounding signals | `src/rag.py`, `src/retrieval.py` |
+| **Orchestration** | LangGraph workflows and agents, tool registry | `src/workflows.py`, `src/agents/`, `src/tools.py` |
+| **Model access** | Groq chat with tool calling, structured (Pydantic) output, vision, typed errors, call budgets, test backends | `src/llm.py` |
+| **External services** | Groq; arXiv, Semantic Scholar, OpenAlex, CrossRef | `src/search.py` |
+| **Study material** | Claims with verified quotes, glossary, flashcards, quiz, explanations at three levels, starter questions | `src/study.py` |
+| **Evaluation** | Metrics, retrieval ablation, answer evaluation, dataset generator, benchmark suite | `evals/` |
 
 ---
 
-## 3. Module design
+## 3. From PDF to index (`src/rag.py`)
 
-### 3.1 Configuration (`config.py`)
+`parse_document()` works in two passes over the pages.
 
-Single entry point for model initialisation. Reads `GROQ_API_KEY` from the environment via `python-dotenv`, constructs the Groq client, and declares the four model IDs.
+**Pass A: layout.** For each page:
+- Text blocks are put in reading order by `ordered_blocks()`. A page counts as two-column when enough narrow blocks sit on each side of the centre; it is then read band by band (bands are separated by full-width blocks such as the title, abstract or a wide figure), left column before right column. Lines that PyMuPDF split on wide gaps (for example `3.1` and `Training Details`) are joined back.
+- Tables are found with `page.find_tables()`. Cell text is read from each cell's rectangle, because the library's own extraction can detach a decimal point from its number. A "table" covering most of the page is treated as a mis-detection.
+- Captions (`Fig. 3.`, `Figure 3:`, `TABLE II`) are recognised; prose that merely mentions a figure is not.
 
-| Model | Role | Rationale |
+**Figures** (`src/figures.py`, see section 5) are located next, because the second pass needs to know where they are.
+
+**Pass B: running text.** Blocks are walked in reading order to build segments of `{page, section, text}`. Numbered and well-known headings start a new section; subsections keep their parent (`3 Method › 3.1 Setup`). Captions, table cells, and short text inside figure regions (axis titles, tick labels, legends) are kept out of the prose. Ligatures are expanded and line-end hyphenation is undone, while real hyphens before digits or after numbers are kept (`60-minute`, `RiverCity-200`).
+
+Finally the reference list is split into numbered entries, and the sentences that cite each figure and table are collected.
+
+**Chunking.** `chunk_segments()` packs whole sentences into chunks of about 900 characters with about 150 characters of overlap, never across a section boundary, so each chunk keeps one page/section anchor. Tables become their own chunks (caption + markdown), figure captions become `caption` chunks, and reference-list chunks are tagged `reference`. Each chunk is indexed as `<section>: <text>` so it can be found by the section it belongs to.
+
+**Indexing.** Chunks are embedded with `BAAI/bge-small-en-v1.5` (384 dimensions; queries get the model's retrieval instruction prefix) and stored in a FAISS inner-product index over normalised vectors, so scores are cosine similarities comparable across questions. A BM25 index is built over the same texts. Embeddings are cached on disk under a hash of the model name and chunk texts, so re-uploading the same paper skips embedding.
+
+---
+
+## 4. Retrieval (`src/retrieval.py`)
+
+```
+question
+  → BM25 ranking + dense ranking  → Reciprocal Rank Fusion
+  → [if evidence is weak: one LLM call writes 2 rewrites + a hypothetical answer passage (HyDE); fuse again]
+  → [optional reranking: cross-encoder or listwise LLM]
+  → adaptive k (read wider when the best passage is weak) → MMR (relevant but not repetitive)
+  → relevance threshold (cosine below MIN_RELEVANCE and no keyword match → dropped)
+  → confidence label: high / medium / low / none
+```
+
+- Reference-list chunks are excluded unless the question is about citations; a question such as "what is reference [12]?" ranks the entry containing `[12]` first.
+- After the answer is written, `check_grounding()` lists numbers in the answer that occur in none of the passages and cited pages that were not among them. Both are shown in the interface.
+- Every switch (`USE_MMR`, `QUERY_EXPANSION`, `RERANK_MODE`, `MIN_RELEVANCE`, `HIGH_CONFIDENCE`, `DEFAULT_TOP_K`) is set in `src/config.py` or `.env`.
+
+---
+
+## 5. Figure understanding (`src/figures.py`)
+
+1. **Graphics on a page** are collected from embedded bitmaps and from clusters of vector drawings (thin rules, table borders and page backgrounds are ignored). Pages with thousands of vector paths use a fast linear merge instead of PyMuPDF's clustering.
+2. **Each caption claims the graphics above it** (or below it, if nothing is above) within its column band, stopping at another caption or a paragraph. Sub-plots are chained into one region, and short text near the region (axis labels, legends) is included.
+3. **A caption with no graphics on its page** takes the largest unclaimed figure on the previous or next page (a figure that pushed its caption over a page break).
+4. **Uncaptioned bitmaps** are kept as unlabelled images.
+5. **The region is rendered** from the page at up to 150 dpi, so vector plots and typed axis labels appear exactly as printed.
+6. **Mentions.** Every sentence that refers to the figure (`Fig. 3`, `Figs. 2 and 3`, `Figures 2–4`, `Figure 5(a)`) is collected with its page and section, plus the following sentence.
+7. **Explanation.** The vision model receives the image, the caption and the mentions, and answers in a fixed structure: what it is, how to read it, what it shows, why it matters in the paper (with page citations), and whether the picture supports the text. A question about the figure uses the same context.
+8. **Reuse.** A successful explanation is added to the search index as a `figure` chunk. A question that names a figure is answered after looking at that figure, and the agent's `analyze_figure` tool takes an optional question.
+
+---
+
+## 6. Workflows and agents
+
+| Feature | Route | Module | Pattern |
+| --- | --- | --- | --- |
+| Upload | `POST /upload` | `workflows.py` | Graph: summarise (targeted retrieval over abstract, method, results, conclusions) → explain the first figures → extract search keywords |
+| Quick answer | `POST /ask` (`mode=simple`) | `workflows.py` | Retrieval pipeline + one grounded answer call, with confidence and grounding report |
+| Thorough answer | `POST /ask` (`mode=agent`) | `agents/qa_agent.py` | ReAct tool loop over `search_paper`, `get_section`, `get_table`, `analyze_figure`, `get_reference`, external literature tools; capped iterations; conversation memory |
+| Related work | `POST /compare` | `workflows.py` | Search four databases → LLM relevance grader → reformulate keywords if too few are relevant (max 3 attempts) → comparative study |
+| Improve writing | `POST /improve` | `workflows.py` | Evaluator-optimizer: critique → rewrite → critic plus number/anchor checks → revise failing edits (max 2 rounds) → verified or flagged |
+| Peer review | `POST /review` | `agents/review_panel.py` | Parallel reviewers with LangGraph `Send`, structured reviews, meta-review decision |
+| Run everything | `POST /analyze` (SSE) | `agents/supervisor.py` | LLM supervisor routes specialists toward a goal; `interrupt` checkpoints let the user approve keywords and pick rewrites |
+| Compare papers | `POST /multi-compare` | `agents/multi_paper.py` | Parallel profiling of 2–5 papers → comparison matrix + synthesis |
+| Study | `POST /api/study/*`, `/api/explain` | `study.py` | Structured generation, then non-LLM checks (quotes searched in the paper, page numbers validated, invented numbers flagged) |
+
+Every response carries a `trace` (agent, kind, detail) and an `llm_calls` count, shown under "How this was produced".
+
+---
+
+## 7. Sessions and resources
+
+- Each browser receives an anonymous, `HttpOnly` cookie and its own `PaperLibrary`. A context variable carries the session into streamed responses and LangGraph worker threads, so the rest of the code calls `library` without knowing about sessions.
+- Idle libraries expire after `SESSION_TTL_SECONDS`; beyond `MAX_SESSIONS` libraries that hold papers, the least recently used is dropped. Dropping a library deletes its uploaded PDFs and figure images. Health checks never create sessions.
+- Uploads must start with a PDF signature and respect `MAX_UPLOAD_MB` and `MAX_PDF_PAGES`. Files are stored under server-generated names.
+- Paper indexes live in the worker's memory, which is why the `Procfile` runs one gunicorn worker.
+
+---
+
+## 8. Interface
+
+- Server-rendered pages (`src/templates/`) share `src/static/app.css` and `src/static/app.js`. Fonts (Newsreader, Instrument Sans), `marked` and `DOMPurify` are bundled, so the page makes no third-party requests.
+- Model output is rendered as Markdown and sanitised with DOMPurify. `[p. N]` and `(p. N)` become buttons that open the page viewer (`/papers/<id>/pages/<n>`), which highlights the cited chunk, quote, table or figure on a server-rendered image of the page; the PDF itself is never modified.
+- Results are kept in the browser's `sessionStorage` per tab. If the server no longer has the paper (restart or expiry), the pages say so and offer to upload it again.
+
+---
+
+## 9. Evaluation (`evals/`)
+
+| Script | Needs an API key | Measures |
 | --- | --- | --- |
-| `openai/gpt-oss-120b` | Primary text generation | Highest reasoning quality for summarisation and comparison |
-| `llama-3.3-70b-versatile` | Fallback text generation | Strong backup when the primary is rate-limited |
-| `llama-3.1-8b-instant` | Fast pipeline tasks | Cheap, quick topic extraction |
-| `meta-llama/llama-4-scout-17b-16e-instruct` | Vision analysis | Multimodal, handles charts and architecture diagrams |
+| `retrieval_eval` | No | Hit rate, MRR, context recall, precision, nDCG for each retrieval configuration, plus a similarity-score calibration that suggests the two thresholds |
+| `run_eval` | Yes | Fact recall, context recall, citation rate and precision, invented numbers, correct and wrong abstention, cost; optional LLM-judged faithfulness, relevance and correctness |
+| `generate_dataset` | Yes | Drafts question sets whose answer key must occur literally in the source passage |
+| `benchmark` | No (`--answers`: yes) | The suite in `evals/benchmark/suite.json` (Attention Is All You Need, BERT, ResNet): pooled metrics with 95% bootstrap intervals, parsing statistics, indexing time and search latency; questions whose answer key is not found in the PDF are reported and excluded |
 
-The embedding model (`all-MiniLM-L6-v2`, 384-D) is wrapped in `@st.cache_resource`, so the ~90 MB checkpoint loads from disk once per server session rather than on every interaction.
-
-### 3.2 Document processing (`utils.py`)
-
-**PDF parsing.** PyMuPDF walks pages, concatenating extracted text and pulling every embedded image object by xref. Two filters keep the figure set clean:
-
-- minimum 300 × 300 px — drops university logos and UI icons
-- maximum 4:1 aspect ratio in either direction — drops "Published online…" banner strips
-
-Survivors are written to the OS temp directory as PNGs and their paths returned alongside the text.
-
-**Chunking.** Text is split into 500-character segments. 500 is the sweet spot: shorter chunks lose the context needed to answer a question, longer ones dilute the embedding vector and degrade retrieval precision. A typical paper yields 80–160 chunks.
-
-**Embedding & storage.** Chunks are batch-encoded to 384-D vectors and added to a flat FAISS index held in session state.
-
-**Semantic retrieval.** The query is encoded into the same space; FAISS returns the k nearest chunks (k = 3 by default, clamped to the corpus size).
-
-**The `llm()` wrapper.** The central API routing function, and the most defensive piece of code in the project:
-
-1. Truncates prompts over 24,000 characters before sending.
-2. Appends a mandatory math-formatting rule (`$$` / `$`, never `\[ \]`) so output renders correctly in Streamlit's markdown.
-3. Calls the primary model at `temperature=0.3`, `max_tokens=4000`.
-4. Strips accidental system-instruction leakage from the response with regex.
-5. Unless `disable_failsafe=True`, trims a truncated response back to its last complete sentence.
-6. On exception, inspects the error string — if it contains `429`, `413` or `limit`, retries against the fallback model (with a 10,000-char budget for `413`). Otherwise returns a readable error string rather than raising.
-
-```mermaid
-flowchart TD
-    A[llm called] --> B[Trim if too long]
-    B --> C[Primary model call]
-    C --> D{Response check}
-    D -->|Success| E[Clean response] --> F([Return])
-    D -->|429| G[Retry with fallback]
-    D -->|413| H[Truncate further] --> G
-    G --> I{Fallback check}
-    I -->|Success| F
-    I -->|Fail| J([Error string])
-```
-
-**Context distillation.** Before the improvement pass, `distill_context()` regex-extracts each of the five comparison sections, caps each at 1,200 characters, and relabels them (`PROBLEM GAPS`, `METHODOLOGY SHORTFALLS`, …). If the parse fails it falls back to the first 3,000 characters. This keeps the improvement prompt inside token limits while preserving the analytical signal.
-
-### 3.3 Academic search (`api_search.py`)
-
-Four independent clients, each returning a normalised dict (`title`, `summary`, `year`, `link`, `venue`):
-
-- **arXiv** — Atom API. Implements *progressive narrowing*: builds a boolean `AND` query from all keywords sorted by submission date, and if that returns nothing, retries with the first 3 keywords, then 2, then finally the raw query sorted by relevance. Responses are parsed with regex rather than an XML dependency.
-- **Semantic Scholar** — Graph API, requesting `title,abstract,year,url,venue`.
-- **OpenAlex** — returns abstracts as an `abstract_inverted_index` (word → list of positions). The client rebuilds readable prose by sorting `(position, word)` pairs, capped at 1,500 characters.
-- **CrossRef** — REST API for published journal metadata. Abstracts are usually absent, so most CrossRef hits are filtered out downstream by the abstract-quality check — they contribute mainly on the domains where the other three are thin.
-
-Every network call is wrapped in try/except with an explicit timeout; a failing source returns `[]` instead of breaking the pipeline.
-
-### 3.4 Orchestration (`graphs.py`)
-
-Every node receives and returns the shared `PaperState` TypedDict, which carries: `text`, `images`, `chunks`, `summary`, `vision`, `topic`, `papers`, the five `comp_*` sections, `improvements`, `edits`, `query`, `answer`, `error`.
-
-All node prompts follow the same template — **role**, **task**, **constraints**, **context** — which measurably reduces both hallucination and format drift. The comparison prompts in particular forbid meta-commentary, "bottom lines" and hypothetical examples, and mandate a paper-by-paper structure with bold subheadings.
+Metric definitions in plain language are in [`evals/README.md`](../evals/README.md).
 
 ---
 
-## 4. The four execution graphs
+## 10. Tests
 
-### 4.1 Upload Graph — `summarize → extract_topic → END`
-
-`node_summarize` sends the first 8,000 characters of the paper under a "Technical Reviewer" role with six mandated sections and an explicit rule against inventing metrics. `node_extract_topic` then reduces that summary to 3–4 bare keywords, which become the global search string for the comparison stage.
-
-In parallel with the graph, the app chunks the text, builds the FAISS index and stores the filtered figure paths.
-
-```mermaid
-flowchart LR
-    A[User uploads PDF] --> B[Parse pages]
-    B --> C[Extract raw text]
-    B --> D[Find embedded images]
-    C --> E[Chunk into 500-char segments] --> F[Generate embeddings] --> G[(FAISS index)]
-    C --> H[Generate structured summary] --> I[Extract topic keywords]
-    D --> J{Size / aspect filter}
-    J -->|Pass| K[Keep figure]
-    J -->|Fail| L[Discard]
-    G & I & K --> M([Session state])
-```
-
-### 4.2 Compare Graph — `arxiv_search → compare_problem → compare_method → compare_data → compare_results → compare_eval → END`
-
-`node_arxiv_search` fans out to all four APIs, concatenates up to ~20 results, then filters:
-
-1. Drop any paper whose abstract is missing, under 100 characters, or contains a "no abstract available" marker — this is what stops the comparison LLM from filling the table with "Not Reported".
-2. Deduplicate on an alphanumeric slug of the title.
-3. Keep the top 6.
-
-Five sequential nodes then each compare the original paper against those six on one dimension, running with `disable_failsafe=True` so structured markdown output isn't truncated mid-list.
-
-```mermaid
-flowchart TD
-    A[Compare initiated] --> B[Read topic from state] --> C[Search orchestrator]
-    C --> D[arXiv] & E[Semantic Scholar] & F[OpenAlex] & G[CrossRef]
-    D & E & F & G --> H[Merge up to 20 papers]
-    H --> I[Filter abstracts · dedupe · top 6]
-    I --> J[1 Problem] --> K[2 Method] --> L[3 Data] --> M[4 Results] --> N[5 Evaluation]
-    N --> O([Render comparison])
-```
-
-Splitting comparison into five separate LLM calls rather than one is deliberate: each call gets the full token budget for its dimension, a rate-limit failure only costs one section, and the UI can render sections as they complete.
-
-### 4.3 Improve Graph — `improve → rewrite → END`
-
-`node_improve` runs the distilled comparison plus the first 5,000 characters of the paper through a "Senior Technical Editor" role that is explicitly barred from generic feedback and required to cite the comparative analysis. `node_rewrite` then asks for a strict JSON array of `{section, original, rewritten}` objects, max 5.
-
-JSON parsing is layered: strip markdown fences → regex-extract the outermost `[...]` → `json.loads` → deduplicate by section name. Both a failed regex match and a parse exception produce a structured error object rather than a crash, so the UI always has something to render.
-
-### 4.4 Q&A Graph — `qa → END`
-
-Encode the question → FAISS top-3 retrieval → join chunks as context → answer under an instruction to use only that context. Three steps, one node, and the reason answers stay grounded.
-
-```mermaid
-flowchart LR
-    A[Question] --> B[Encode to 384-D] --> C[Search FAISS] --> D[Top 3 chunks]
-    D --> E[Context + question] --> F[Groq LLM] --> G[Grounded answer]
-```
-
-### 4.5 Figure analysis
-
-Outside the graphs, `analyze_single_image()` base64-encodes a figure and sends it to the vision model with a three-part prompt (type / key insights / importance). Results are memoised in a `vision_dict` keyed by figure index, so re-renders never re-bill an API call. Figures can be analysed individually or in bulk.
-
----
-
-## 5. Design decisions and rationale
-
-**Why state-graph orchestration over a linear script?** Explicit execution structure, clean context separation, and fault isolation per node. A failure in `compare_data` doesn't take down `compare_results`.
-
-**Why a local vector database?** Hosted vector DBs add network latency, per-query cost, and data-privacy exposure. Uploaded manuscripts are frequently unpublished and sometimes proprietary; FAISS keeps them on disk and returns results in under a millisecond.
-
-**Why four academic databases?** Their coverage footprints barely overlap. arXiv is deep on computing preprints but thin elsewhere; Semantic Scholar has the richest metadata; OpenAlex has open-access volume; CrossRef indexes published journals. Together they return a usable comparison set no matter what domain the uploaded paper belongs to.
-
-**Why 500-character chunks?** Below 500, chunks lose the surrounding context that makes a retrieved passage answerable. Above 500, the embedding vector averages over too many ideas and retrieval precision drops.
-
-**Why five separate comparison calls?** Token budget per dimension, partial-failure containment, and progressive rendering.
-
-**Why prompt-level anti-hallucination constraints?** The summariser is explicitly forbidden from inventing metrics, formulas or scores; the comparison nodes are told to write "Not Reported" rather than guess. Combined with abstract-quality filtering upstream, this is what keeps the comparison tables honest.
-
----
-
-## 6. Known limitations
-
-| Limitation | Cause | Path forward |
-| --- | --- | --- |
-| Long papers are truncated | Summariser reads first 8,000 chars | Hierarchical / map-reduce summarisation |
-| No chunk overlap | Fixed-size 500-char split | Recursive character splitting with overlap |
-| Vector figures missed | Only embedded raster images are extracted | Page-region rendering for vector graphics |
-| CrossRef hits mostly filtered | REST API rarely exposes abstracts | Supplement with Unpaywall / OpenAlex join |
-| Rewrites not written back to PDF | Not yet implemented | PyMuPDF in-place text replacement |
-| Session state is per-browser-session | Streamlit's execution model | Persistent index store keyed by document hash |
+`python -m unittest discover -s tests` runs the whole suite without network access or an API key: a scripted fake LLM and vision backend stand in for Groq, a hashing encoder stands in for the embedding model, and test PDFs are generated in code (`tests/pdf_factory.py`), including a two-column page whose native text order is wrong on purpose and a paper whose figures are vector drawings discussed on another page.

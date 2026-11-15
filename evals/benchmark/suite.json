@@ -1,0 +1,33 @@
+{
+  "description": "Papers used by `python -m evals.benchmark`. Real papers are downloaded from arXiv by `python -m evals.benchmark download` (PDFs are not stored in the repository). Add your own paper by appending an entry with `pdf` and `dataset` paths.",
+  "papers": [
+    {
+      "id": "attention",
+      "title": "Attention Is All You Need",
+      "arxiv": "1706.03762",
+      "pdf": "evals/benchmark/papers/1706.03762.pdf",
+      "dataset": "evals/benchmark/attention.json"
+    },
+    {
+      "id": "bert",
+      "title": "BERT: Pre-training of Deep Bidirectional Transformers",
+      "arxiv": "1810.04805",
+      "pdf": "evals/benchmark/papers/1810.04805.pdf",
+      "dataset": "evals/benchmark/bert.json"
+    },
+    {
+      "id": "resnet",
+      "title": "Deep Residual Learning for Image Recognition",
+      "arxiv": "1512.03385",
+      "pdf": "evals/benchmark/papers/1512.03385.pdf",
+      "dataset": "evals/benchmark/resnet.json"
+    },
+    {
+      "id": "sample",
+      "title": "Synthetic sample paper (invented content)",
+      "synthetic": true,
+      "pdf": "evals/sample/sample_paper.pdf",
+      "dataset": "evals/datasets/sample_paper.json"
+    }
+  ]
+}

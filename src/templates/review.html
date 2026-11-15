@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Peer review · ScholarAI{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Peer review</h1>
+  <p>Reviewers with different specialities read the paper at the same time. Each one scores it and cites evidence
+    for every weakness. A chair then weighs the reviews and gives a decision.</p>
+</header>
+
+<div id="noPaper" class="panel empty hidden">
+  <h2>No paper open</h2>
+  <p>Upload a paper to have it reviewed.</p>
+  <a class="btn btn-primary" href="/">Upload a paper</a>
+</div>
+
+<div id="mainContent">
+  <div class="panel">
+    <p class="label">Who should review?</p>
+    <div class="row" id="reviewerChecks" style="gap:18px">
+      <label class="check"><input type="checkbox" value="methodology" checked/> Methodology</label>
+      <label class="check"><input type="checkbox" value="novelty" checked/> Novelty</label>
+      <label class="check"><input type="checkbox" value="reproducibility" checked/> Reproducibility</label>
+      <label class="check"><input type="checkbox" value="clarity" checked/> Clarity</label>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn btn-primary" id="reviewBtn">Start the review</button>
+      <span id="reviewStatus"></span>
+    </div>
+    <p class="hint" id="noveltyTip" style="margin-top:10px">Tip: run <a href="/compare">Related work</a> first so the novelty reviewer can judge the paper against other work.</p>
+  </div>
+
+  <div id="results" class="hidden">
+    <h2 class="section">Scores</h2>
+    <div class="scores" id="scoreTiles"></div>
+
+    <h2 class="section">Reviews</h2>
+    <div class="panel">
+      <div id="reviewOutput" class="prose"></div>
+      <div id="reviewTrace"></div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const DECISIONS = { accept: ["ok", "Accept"], minor_revision: ["ok", "Minor revision"],
+                      major_revision: ["warn", "Major revision"], reject: ["bad", "Reject"] };
+
+  async function runReview() {
+    const reviewers = [...document.querySelectorAll("#reviewerChecks input:checked")].map(i => i.value);
+    if (!reviewers.length) { say("reviewStatus", "bad", "Pick at least one reviewer."); return; }
+    setBtn("reviewBtn", true, "The reviewers are reading…");
+    say("reviewStatus", "", "");
+    try {
+      const data = await postJSON("/review", { summary: SS.str("summary"), comparison: SS.str("comparison"), reviewers });
+      SS.set("review", data);
+      showReview(data);
+    } catch (e) {
+      say("reviewStatus", "bad", e.message);
+    }
+    setBtn("reviewBtn", false, "Start the review");
+  }
+
+  function showReview(data) {
+    const meta = data.meta_review || {};
+    const tiles = [];
+    if (meta.decision) {
+      const d = DECISIONS[meta.decision] || ["", meta.decision.replace(/_/g, " ")];
+      tiles.push(`<div class="score"><span class="hint">Decision</span><b>${esc(d[1])}</b>
+        <span class="tag ${d[0] ? "tag-" + d[0] : ""}">${Number(meta.overall_score).toFixed(1)} out of 10 overall</span></div>`);
+    }
+    (data.reviews || []).forEach(r => tiles.push(`<div class="score"><span class="hint">${esc(r.reviewer)}</span><b>${esc(r.score)}<span class="hint"> / 10</span></b>
+      <span class="hint">${plural((r.weaknesses || []).length, "issue")} raised</span></div>`));
+    $("scoreTiles").innerHTML = tiles.join("");
+    $("reviewOutput").innerHTML = md(data.review_markdown);
+    $("reviewTrace").innerHTML = renderTrace(data.trace, data.llm_calls);
+    $("results").classList.remove("hidden");
+  }
+
+  $("reviewBtn").addEventListener("click", runReview);
+  if (requirePaper()) {
+    if (SS.str("comparison")) $("noveltyTip").classList.add("hidden");
+    const saved = SS.get("review");
+    if (saved) showReview(saved);
+  }
+</script>
+{% endblock %}

@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Export · ScholarAI{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Export your work</h1>
+  <p>Everything you produced for this paper in one file. Parts you have not run yet are simply left out.</p>
+</header>
+
+<div id="noPaper" class="panel empty hidden">
+  <h2>No paper open</h2>
+  <p>Upload a paper and run some analysis first.</p>
+  <a class="btn btn-primary" href="/">Upload a paper</a>
+</div>
+
+<div id="mainContent">
+  <div class="panel">
+    <h2 class="section" style="margin-top:0">What will be included</h2>
+    <table class="table" id="contents"></table>
+  </div>
+
+  <div class="panel stack">
+    <div class="row between">
+      <div><h3 class="sub">Notes as Markdown</h3><p class="muted small">Opens in any editor, Notion, Obsidian or GitHub. Made in your browser, instantly.</p></div>
+      <button class="btn btn-primary" id="dlMdBtn">Download .md</button>
+    </div>
+    <hr class="rule" style="margin:4px 0"/>
+    <div class="row between">
+      <div><h3 class="sub">Report as PDF</h3><p class="muted small">Summary, figure explanations, questions and answers, comparison, review and rewrites.</p></div>
+      <button class="btn" id="dlFullBtn">Download report</button>
+    </div>
+    <hr class="rule" style="margin:4px 0"/>
+    <div class="row between">
+      <div><h3 class="sub">Your paper with the rewrites applied</h3><p class="muted small">Experimental. Works best on single-column PDFs; check the layout of every changed passage.</p></div>
+      <button class="btn" id="dlEditedBtn">Download edited PDF</button>
+    </div>
+    <div id="dlStatus"></div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const D = {
+    title: SS.str("title"), topic: SS.str("topic"), summary: SS.str("summary"), vision: SS.get("vision") || [],
+    figures: SS.get("figures") || [], comparison: SS.str("comparison"), improvements: SS.str("improvements"),
+    edits: SS.get("edits") || [], papers: SS.get("papers") || [], review: SS.get("review"),
+    qa: SS.get("qaHistory") || [], insights: SS.get("insights"),
+  };
+
+  function contents() {
+    const figs = D.figures.filter(f => f.analysis).length || D.vision.length;
+    const rows = [
+      ["Summary", !!D.summary, "Ready", "Not available", "/"],
+      ["Figure explanations", figs > 0, plural(figs, "figure"), "None yet", "/figures"],
+      ["Questions and answers", D.qa.length > 0, plural(D.qa.length, "question"), "None asked", "/qa"],
+      ["Claims and evidence", !!D.insights, D.insights ? plural(D.insights.total, "claim") : "", "Not built", "/study"],
+      ["Related work", !!D.comparison, plural(D.papers.length, "paper"), "Not run", "/compare"],
+      ["Peer review", !!(D.review && D.review.review_markdown), "Ready", "Not run", "/review"],
+      ["Rewrites", D.edits.length > 0, plural(D.edits.length, "rewrite"), "Not run", "/improve"],
+    ];
+    $("contents").innerHTML = rows.map(r => `<tr><td>${r[0]}</td>
+      <td>${r[1] ? `<span class="tag tag-ok">${esc(r[2])}</span>` : `<span class="tag">${esc(r[3])}</span>`}</td>
+      <td class="num">${r[1] ? "" : `<a href="${r[4]}">Go there</a>`}</td></tr>`).join("");
+  }
+
+  function buildMarkdown() {
+    const out = [`# ${D.title || "Paper notes"}`, "", `*Notes made with ScholarAI. Page references point to the original PDF.*`, ""];
+    const add = (heading, body) => { if (body && String(body).trim()) out.push(`## ${heading}`, "", String(body).trim(), ""); };
+    add("Summary", D.summary);
+    add("Figures", D.figures.filter(f => f.analysis).map(f =>
+      `### ${f.label || f.id} (p. ${f.page})\n\n> ${f.caption || "No caption found."}\n\n${f.analysis}`).join("\n\n") || D.vision.join("\n\n"));
+    if (D.insights) {
+      add("Claims and evidence", D.insights.claims.map(c =>
+        `- **${c.claim}**\n  - Evidence${c.page ? ` (p. ${c.page})` : ""}: "${c.evidence}"\n  - Support: ${c.strength}. Quote check: ${
+          { exact: "found in the paper", close: "close match in the paper", not_found: "NOT found in the paper" }[c.verified]}`).join("\n"));
+      add("Key terms", D.insights.terms.map(t => `- **${t.term}**: ${t.definition}${t.page ? ` (p. ${t.page})` : ""}`).join("\n"));
+    }
+    add("Questions and answers", D.qa.map(h => `### ${h.q}\n\n${h.a}`).join("\n\n"));
+    add("Related work", D.papers.map(p => `- [${p.title}](${p.link}) (${[p.year, p.venue].filter(Boolean).join(", ")})`).join("\n"));
+    add("How the paper compares", D.comparison);
+    add("Peer review", D.review && D.review.review_markdown);
+    add("Critique", D.improvements);
+    add("Suggested rewrites", D.edits.map(e =>
+      `### ${e.section}\n\n*${e.verification && e.verification.status === "verified" ? "Fact-checked" : "Needs your check"}*\n\n**In the paper:** ${e.original}\n\n**Suggested:** ${e.rewritten}`).join("\n\n"));
+    return out.join("\n");
+  }
+
+  async function fetchFile(btnId, label, busy, url, body, filename) {
+    setBtn(btnId, true, busy);
+    say("dlStatus", "", "");
+    try {
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!res.ok) {
+        let err = {}; try { err = await res.json(); } catch {}
+        throw new Error(friendlyError(err.error || "The file could not be built."));
+      }
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(await res.blob());
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+      say("dlStatus", "ok", `${filename} downloaded`);
+    } catch (e) {
+      say("dlStatus", "bad", e.message);
+    }
+    setBtn(btnId, false, label);
+  }
+
+  $("dlMdBtn").addEventListener("click", () => {
+    downloadText("paper_notes.md", buildMarkdown(), "text/markdown");
+    say("dlStatus", "ok", "paper_notes.md downloaded");
+  });
+  $("dlFullBtn").addEventListener("click", () => fetchFile("dlFullBtn", "Download report", "Building the report…", "/generate-pdf", {
+    summary: D.summary, vision: D.figures.filter(f => f.analysis).length
+      ? D.figures.filter(f => f.analysis).map(f => `### ${f.label || f.id} · page ${f.page}\n\n> ${f.caption}\n\n${f.analysis}`) : D.vision,
+    comparison: D.comparison,
+    improvements: D.improvements + (D.review && D.review.review_markdown ? "\n\n## Peer-Review Panel\n\n" + D.review.review_markdown : ""),
+    edits: D.edits, papers: D.papers, topic: D.topic,
+    qa_text: D.qa.map(h => `Q: ${h.q}\n\nA: ${h.a}`).join("\n\n---\n\n"),
+  }, "paper_full_analysis.pdf"));
+  $("dlEditedBtn").addEventListener("click", () => {
+    if (!D.edits.length) { say("dlStatus", "bad", "There are no rewrites yet. Run Improve writing first."); return; }
+    fetchFile("dlEditedBtn", "Download edited PDF", "Applying the rewrites…", "/download-original", { edits: D.edits }, "paper_edited.pdf");
+  });
+
+  if (requirePaper()) contents();
+</script>
+{% endblock %}

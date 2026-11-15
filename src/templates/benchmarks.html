@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Benchmarks · ScholarAI{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Benchmarks</h1>
+  <p>How well ScholarAI finds the right passage and answers correctly, measured on real papers with hand-checked
+    answer keys. These numbers come from a script anyone can re-run.</p>
+</header>
+
+<div id="benchBody"><div class="working"><span class="spinner"></span> Loading the latest run…</div></div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const CONFIG_NOTE = {
+    "bm25": "Keyword search only",
+    "dense": "Meaning (embedding) search only",
+    "hybrid": "Keyword and meaning search combined",
+    "hybrid+mmr": "Combined, with repeated passages removed",
+    "pipeline": "What the app uses: combined search, fewer repeats, weak passages dropped",
+    "pipeline+ce": "The app's pipeline plus a reranking model",
+  };
+  const pct = v => v == null ? "n/a" : (v * 100).toFixed(1) + "%";
+
+  function bar(value, ci, best) {
+    const w = Math.max(0, Math.min(1, value || 0)) * 100;
+    const range = ci ? `<u style="left:${ci[0] * 100}%;width:${Math.max(0.5, (ci[1] - ci[0]) * 100)}%" title="95% confidence interval: ${pct(ci[0])} to ${pct(ci[1])}"></u>` : "";
+    return `<div class="bar ${best ? "best" : ""}"><i style="width:${w}%"></i>${range}</div>`;
+  }
+
+  function retrievalTable(pooled) {
+    const names = Object.keys(pooled);
+    const top = Math.max(...names.map(n => pooled[n].context_recall));
+    return `<div class="table-wrap"><table class="table">
+      <tr><th>Retrieval setting</th><th>Evidence found</th><th class="num">Hit rate</th><th class="num">Context recall</th>
+          <th class="num">Rank of first hit (MRR)</th><th class="num">Precision</th><th class="num">Passages read</th></tr>` +
+      names.map(n => {
+        const m = pooled[n], best = m.context_recall === top;
+        return `<tr class="${best ? "best" : ""}"><td>${esc(n)}<div class="hint">${esc(CONFIG_NOTE[n] || "")}</div></td>
+          <td>${bar(m.context_recall, m.context_recall_ci, best)}</td>
+          <td class="num">${pct(m.hit)}</td><td class="num">${pct(m.context_recall)}</td>
+          <td class="num">${Number(m.mrr).toFixed(2)}</td><td class="num">${pct(m.precision)}</td><td class="num">${Number(m.n_chunks).toFixed(1)}</td></tr>`;
+      }).join("") + `</table></div>
+      <p class="hint" style="margin-top:8px">The bar is context recall: the share of expected facts that appear in the passages handed to the language model.
+        The yellow band is the 95% confidence interval. With this few questions the bands are wide, so small differences between rows may be chance.</p>`;
+  }
+
+  function answersTable(ans, judged) {
+    const MODE = { naive: "Plain RAG (before the upgrade)", simple: "Quick answer (current pipeline)", agent: "Thorough answer (agent)" };
+    const cols = [["fact_recall", "Facts in the answer"], ["cited", "Cites a page"], ["citation_precision", "Citations are real"],
+                  ["abstain_ok", "Says \"not covered\" when it should"], ["false_abstain", "Wrongly says \"not covered\""]]
+      .concat(judged ? [["faithfulness", "Faithful to the passages"], ["correctness", "Correct (judged)"]] : []);
+    return `<div class="table-wrap"><table class="table"><tr><th>How the answer is produced</th>${cols.map(c => `<th class="num">${c[1]}</th>`).join("")}
+      <th class="num">Invented numbers per answer</th><th class="num">Model calls</th><th class="num">Seconds</th></tr>` +
+      Object.entries(ans).map(([m, s]) => `<tr><td>${esc(MODE[m] || m)}<div class="hint">${s.n} questions${s.errors ? `, ${s.errors} failed` : ""}</div></td>
+        ${cols.map(c => `<td class="num">${pct(s[c[0]])}</td>`).join("")}
+        <td class="num">${s.halluc_numbers ?? "n/a"}</td><td class="num">${s.llm_calls ?? "n/a"}</td><td class="num">${s.seconds ?? "n/a"}</td></tr>`).join("") +
+      `</table></div>`;
+  }
+
+  function papersTable(papers) {
+    return `<div class="table-wrap"><table class="table"><tr><th>Paper</th><th class="num">Pages</th><th class="num">Passages</th>
+      <th class="num">Figures found</th><th class="num">with caption</th><th class="num">cited in text</th><th class="num">Tables</th>
+      <th class="num">References</th><th class="num">Seconds to index</th><th class="num">Search time</th><th class="num">Questions</th></tr>` +
+      papers.map(p => `<tr><td>${esc(p.title)}${p.synthetic ? ` <span class="tag tag-warn">invented test paper</span>` : ""}
+          ${p.invalid_questions.length ? `<div class="hint">${plural(p.invalid_questions.length, "question")} left out: the answer key was not found in this PDF</div>` : ""}</td>
+        <td class="num">${p.parsing.pages}</td><td class="num">${p.parsing.chunks}</td><td class="num">${p.parsing.figures}</td>
+        <td class="num">${p.parsing.figures_with_caption}</td><td class="num">${p.parsing.figures_with_mentions}</td>
+        <td class="num">${p.parsing.tables}</td><td class="num">${p.parsing.references}</td>
+        <td class="num">${p.index_seconds}</td><td class="num">${p.retrieval_ms} ms</td><td class="num">${p.questions}</td></tr>`).join("") + `</table></div>`;
+  }
+
+  const HOW = `<pre class="cmd">python -m evals.benchmark download     # fetch the three arXiv papers (once)
+python -m evals.benchmark run          # retrieval and speed, no API key needed
+python -m evals.benchmark run --answers --judge --sleep 3    # also score the answers (uses your Groq key)</pre>`;
+
+  function render(r) {
+    if (!r) {
+      $("benchBody").innerHTML = `<div class="panel">
+        <h2 class="section" style="margin-top:0">No benchmark has been run on this installation yet</h2>
+        <p class="muted">Run these commands in the project folder. The results appear on this page and are saved in
+          <code>evals/benchmark/latest.json</code>; commit that file to show them on a deployed copy.</p>${HOW}
+        <p class="muted">The suite is three well-known papers (Attention Is All You Need, BERT, ResNet) with 42 answerable and 9
+          unanswerable questions. Every answer key was checked against the paper's text.</p></div>`;
+      return;
+    }
+    const real = r.papers.filter(p => !p.synthetic);
+    let html = "";
+    if (r.offline) html += `<p class="note note-warn banner">This run used a toy embedder (offline smoke test). The numbers show that the scripts work, not how good retrieval is.</p>`;
+    html += `<ul class="facts" style="margin-bottom:8px"><li>Run on <b>${esc(r.generated)}</b></li><li>Embedding model <b>${esc(r.embedding_model)}</b></li>
+      <li><b>${r.papers.length}</b> paper${r.papers.length === 1 ? "" : "s"}${real.length !== r.papers.length ? " (some invented for testing)" : ""}</li>
+      <li>Passages requested per question <b>${r.k}</b></li><li>${esc(r.machine)}</li></ul>`;
+    if (Object.keys(r.pooled_retrieval || {}).length)
+      html += `<h2 class="section">Does it find the right passage?</h2>${retrievalTable(r.pooled_retrieval)}`;
+    if (r.pooled_answers)
+      html += `<h2 class="section">Are the answers right and grounded?</h2>${answersTable(r.pooled_answers, r.judge)}`;
+    html += `<h2 class="section">Per paper: parsing and speed</h2>${papersTable(r.papers)}`;
+    if ((r.skipped || []).length)
+      html += `<p class="hint" style="margin-top:10px">Skipped: ${r.skipped.map(s => esc(s.id)).join(", ")} (PDF not downloaded).</p>`;
+    html += `<h2 class="section">Run it yourself</h2>${HOW}
+      <p class="muted">Metric definitions are in <code>evals/README.md</code>. Add your own paper by appending it to <code>evals/benchmark/suite.json</code>.</p>`;
+    $("benchBody").innerHTML = html;
+  }
+
+  fetch("/api/benchmarks").then(r => r.json()).then(d => render(d.result))
+    .catch(() => { $("benchBody").innerHTML = `<p class="note note-bad">Could not reach the server.</p>`; });
+</script>
+{% endblock %}

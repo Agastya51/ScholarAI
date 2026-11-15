@@ -1,0 +1,106 @@
+{
+  "description": "Hand-written question set. Every expected fact was checked against the text of the arXiv version named in `paper`. Facts are short exact strings; a retrieved chunk counts as relevant when it contains one.",
+  "paper": "arXiv:1512.03385 (Deep Residual Learning for Image Recognition)",
+  "questions": [
+    {
+      "question": "What top-5 error does the ensemble of residual nets achieve on the ImageNet test set?",
+      "expected_facts": [
+        "3.57%"
+      ]
+    },
+    {
+      "question": "How deep are the deepest residual nets evaluated on ImageNet?",
+      "expected_facts": [
+        "152 layers"
+      ]
+    },
+    {
+      "question": "What relative improvement is obtained on the COCO object detection dataset?",
+      "expected_facts": [
+        "28%"
+      ]
+    },
+    {
+      "question": "What mini-batch size is used for ImageNet training?",
+      "expected_facts": [
+        "mini-batch size of 256"
+      ]
+    },
+    {
+      "question": "What weight decay is used?",
+      "expected_facts": [
+        "0.0001"
+      ]
+    },
+    {
+      "question": "What test error does the 110-layer ResNet reach on CIFAR-10?",
+      "expected_facts": [
+        "6.43"
+      ]
+    },
+    {
+      "question": "What is the test error of the 1202-layer network on CIFAR-10, and how many parameters does it have?",
+      "expected_facts": [
+        "7.93",
+        "19.4M"
+      ]
+    },
+    {
+      "question": "How many FLOPs does the 152-layer ResNet need?",
+      "expected_facts": [
+        "11.3 billion"
+      ]
+    },
+    {
+      "question": "What is the single-model top-5 validation error of the 152-layer ResNet?",
+      "expected_facts": [
+        "4.49%"
+      ]
+    },
+    {
+      "question": "How many training images does the ImageNet 2012 classification dataset have?",
+      "expected_facts": [
+        "1.28 million"
+      ]
+    },
+    {
+      "question": "Which detection method is adopted for the PASCAL and MS COCO experiments?",
+      "expected_facts": [
+        "Faster R-CNN"
+      ]
+    },
+    {
+      "question": "How many models of different depth form the ensemble?",
+      "expected_facts": [
+        "six models"
+      ]
+    },
+    {
+      "question": "How many FLOPs does the 34-layer residual network have?",
+      "expected_facts": [
+        "3.6 billion"
+      ]
+    },
+    {
+      "question": "What kind of crop testing is adopted for the comparison studies?",
+      "expected_facts": [
+        "10-crop"
+      ]
+    },
+    {
+      "question": "What BLEU score does ResNet achieve on WMT 2014 English-to-German?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "How many attention heads does ResNet-152 use?",
+      "expected_facts": [],
+      "answerable": false
+    },
+    {
+      "question": "What top-1 accuracy does ResNet-152 reach on the JFT-300M dataset?",
+      "expected_facts": [],
+      "answerable": false
+    }
+  ]
+}

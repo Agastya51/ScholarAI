@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}Improve writing · ScholarAI{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Improve the writing</h1>
+  <p>Finds vague or unsupported passages and proposes rewrites. A fact-checker then compares each rewrite with the
+    paper and sends it back if it changed a number or a claim.</p>
+</header>
+
+<div id="noPaper" class="panel empty hidden">
+  <h2>No paper open</h2>
+  <p>Upload a paper to get suggested rewrites.</p>
+  <a class="btn btn-primary" href="/">Upload a paper</a>
+</div>
+
+<div id="mainContent">
+  <div class="panel">
+    <div class="row">
+      <button class="btn btn-primary" id="improveBtn">Find weak passages and rewrite them</button>
+      <span id="improveStatus"></span>
+    </div>
+    <p class="hint" id="compareTip" style="margin-top:10px">Tip: run <a href="/compare">Related work</a> first. The critique is sharper when it can compare with other papers.</p>
+  </div>
+
+  <div id="results" class="hidden">
+    <h2 class="section" id="editsHead">Suggested rewrites</h2>
+    <div id="editsPreview"></div>
+
+    <h2 class="section">Full critique</h2>
+    <div class="panel">
+      <div id="improvementOutput" class="prose"></div>
+      <div id="improveTrace"></div>
+    </div>
+
+    <div class="row end" style="margin-top:24px"><a class="btn btn-primary" href="/download">Export the results</a></div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  async function runImprovement() {
+    setBtn("improveBtn", true, "Critiquing, rewriting and fact-checking…");
+    say("improveStatus", "", "");
+    try {
+      const data = await postJSON("/improve", { summary: SS.str("summary"),
+        comparison: SS.str("comparison") || "No prior comparative analysis available." });
+      SS.set("improveRun", { trace: data.trace || [], calls: data.llm_calls, revisions: data.revisions });
+      SS.set("improvements", data.improvements);
+      SS.set("edits", data.edits || []);
+      showAnalysis();
+    } catch (e) {
+      say("improveStatus", "bad", e.message);
+    }
+    setBtn("improveBtn", false, "Find weak passages and rewrite them");
+  }
+
+  function verification(v) {
+    if (!v) return "";
+    const checks = v.attempts ? `, checked ${v.attempts === 1 ? "once" : v.attempts + " times"}` : "";
+    return v.status === "verified"
+      ? `<span class="tag tag-ok" title="No number or claim changed compared with the paper${checks}">Fact-checked</span>`
+      : `<span class="tag tag-bad" title="The fact-checker still found problems${checks}">Needs your check</span>`;
+  }
+
+  function showAnalysis() {
+    const edits = SS.get("edits") || [];
+    $("improvementOutput").innerHTML = md(SS.str("improvements"));
+    $("editsHead").textContent = edits.length ? `${plural(edits.length, "suggested rewrite")}` : "No rewrites were proposed";
+    $("editsPreview").innerHTML = edits.map(e => {
+      const v = e.verification;
+      const issues = v && v.status !== "verified" && (v.issues || []).length
+        ? `<p class="note note-warn" style="margin-top:10px">${v.issues.map(esc).join("<br>")}</p>` : "";
+      return `<article class="item">
+        <div class="row between"><h3 class="sub" style="margin:0">${esc(e.section || "Passage")}</h3>${verification(v)}</div>
+        <div class="before-after">
+          <div class="before"><div class="label">In the paper</div>${esc(e.original || "")}</div>
+          <div class="after"><div class="label">Suggested</div>${esc(e.rewritten || "")}</div>
+        </div>${issues}
+      </article>`;
+    }).join("");
+    const run = SS.get("improveRun");
+    $("improveTrace").innerHTML = run ? renderTrace(run.trace, run.calls) : "";
+    $("results").classList.remove("hidden");
+  }
+
+  $("improveBtn").addEventListener("click", runImprovement);
+  if (requirePaper()) {
+    if (SS.str("comparison")) $("compareTip").classList.add("hidden");
+    if (SS.str("improvements")) showAnalysis();
+  }
+</script>
+{% endblock %}

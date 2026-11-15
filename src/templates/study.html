@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block title %}Study · ScholarAI{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Study this paper</h1>
+  <p>What the paper claims and how well each claim is backed, the terms you need, and practice material.
+    Quoted evidence is searched for in the paper automatically, so you can see which quotes are real.</p>
+</header>
+
+<div id="noPaper" class="panel empty hidden">
+  <h2>No paper open</h2>
+  <p>Upload a paper to build study material from it.</p>
+  <a class="btn btn-primary" href="/">Upload a paper</a>
+</div>
+
+<div id="mainContent">
+  <div class="tabs" id="studyTabs">
+    <button class="tab active" data-panel="pClaims">Claims and evidence</button>
+    <button class="tab" data-panel="pTerms">Key terms</button>
+    <button class="tab" data-panel="pCards">Flashcards</button>
+    <button class="tab" data-panel="pQuiz">Quiz</button>
+  </div>
+
+  <section id="pClaims"></section>
+  <section id="pTerms" class="hidden"></section>
+  <section id="pCards" class="hidden"></section>
+  <section id="pQuiz" class="hidden"></section>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const STRENGTH = { strong: ["ok", "Strong support"], moderate: ["", "Moderate support"], weak: ["warn", "Weak support"] };
+  const VERIFIED = { exact: ["ok", "Quote found in the paper"], close: ["warn", "Close match in the paper"],
+                     not_found: ["bad", "Quote not found in the paper"] };
+  let cardIndex = 0, quizState = [];
+
+  function starter(panel, title, text, button, fn) {
+    $(panel).innerHTML = `<div class="panel empty"><h2>${title}</h2><p>${text}</p>
+      <button class="btn btn-primary" id="${panel}Go">${button}</button><div id="${panel}St" style="margin-top:10px"></div></div>`;
+    $(panel + "Go").addEventListener("click", fn);
+  }
+
+  async function build(kind, panel, label) {
+    setBtn(panel + "Go", true, label);
+    try {
+      const data = await postJSON(`/api/study/${kind}`, {});
+      SS.set(kind, data);
+      renderAll();
+    } catch (e) {
+      say(panel + "St", "bad", e.message);
+      setBtn(panel + "Go", false, "Try again");
+    }
+  }
+  const buildInsights = () => build("insights", $("pClaims").classList.contains("hidden") ? "pTerms" : "pClaims", "Reading the paper critically…");
+  const buildPractice = () => build("practice", $("pCards").classList.contains("hidden") ? "pQuiz" : "pCards", "Writing cards and questions…");
+
+  function renderClaims(ins) {
+    const head = `<p class="note ${ins.verified === ins.total ? "note-ok" : ""}" style="margin-bottom:20px">
+      ${ins.verified} of ${plural(ins.total, "quote")} were found word for word in the paper. Treat a claim whose quote was not found as unverified.</p>`;
+    $("pClaims").innerHTML = head + ins.claims.map(c => {
+      const s = STRENGTH[c.strength] || STRENGTH.moderate, v = VERIFIED[c.verified] || VERIFIED.not_found;
+      const cite = c.page ? `<button type="button" class="cite" data-page="${c.page}"${c.chunk_id != null ? ` data-chunk="${c.chunk_id}"` : ""} data-quote="${esc(c.evidence.slice(0, 300))}" data-snippet="${esc(c.evidence)}">p. ${c.page}</button>` : "";
+      const nums = (c.unsupported_numbers || []).length
+        ? `<span class="tag tag-warn" title="These numbers are in the claim but nowhere in the paper">Check: ${esc(c.unsupported_numbers.join(", "))}</span>` : "";
+      return `<article class="claim">
+        <p class="claim-text">${esc(c.claim)}</p>
+        <p class="claim-quote">${c.verified === "not_found" ? esc(c.evidence) : `<mark>${esc(c.evidence)}</mark>`} ${cite}</p>
+        <div class="row"><span class="tag ${s[0] ? "tag-" + s[0] : ""}">${s[1]}</span><span class="tag tag-${v[0]}">${v[1]}</span>${nums}
+          <span class="hint">${esc(c.why)}</span></div>
+      </article>`;
+    }).join("");
+  }
+
+  function renderTerms(ins) {
+    $("pTerms").innerHTML = `<dl style="margin:0">` + ins.terms.map(t =>
+      `<div class="term"><dt>${esc(t.term)}</dt><dd>${esc(t.definition)} ${t.page ? `<button type="button" class="cite" data-page="${t.page}">p. ${t.page}</button>` : ""}</dd></div>`).join("") + `</dl>`;
+  }
+
+  function renderCards(pr) {
+    const cards = pr.flashcards;
+    if (!cards.length) { $("pCards").innerHTML = `<p class="muted">No flashcards could be made from this paper.</p>`; return; }
+    cardIndex = Math.min(cardIndex, cards.length - 1);
+    const c = cards[cardIndex];
+    const warn = (c.unsupported_numbers || []).length ? `<span class="tag tag-warn">Check: ${esc(c.unsupported_numbers.join(", "))}</span>` : "";
+    $("pCards").innerHTML = `<div class="card-stage">
+        <button class="flashcard" id="flash" aria-label="Flashcard. Press to turn it over.">
+          <span class="flash-face"><span>${esc(c.front)}</span><span class="hint">Click to see the answer</span></span>
+          <span class="flash-face back"><span>${esc(c.back)}</span></span>
+        </button>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:16px">
+        <button class="btn" id="cardPrev" ${cardIndex === 0 ? "disabled" : ""}>Previous</button>
+        <span class="muted">Card ${cardIndex + 1} of ${cards.length}</span>
+        <button class="btn" id="cardNext" ${cardIndex === cards.length - 1 ? "disabled" : ""}>Next</button>
+        ${c.page ? `<button type="button" class="cite" data-page="${c.page}">p. ${c.page}</button>` : ""}${warn}
+      </div>`;
+    $("flash").addEventListener("click", () => $("flash").classList.toggle("flipped"));
+    $("cardPrev").addEventListener("click", () => { cardIndex--; renderCards(pr); });
+    $("cardNext").addEventListener("click", () => { cardIndex++; renderCards(pr); });
+  }
+
+  function renderQuiz(pr) {
+    const quiz = pr.quiz;
+    if (!quiz.length) { $("pQuiz").innerHTML = `<p class="muted">No quiz questions could be made from this paper.</p>`; return; }
+    if (quizState.length !== quiz.length) quizState = quiz.map(() => null);
+    const answered = quizState.filter(a => a !== null).length;
+    const right = quizState.filter((a, i) => a === quiz[i].answer).length;
+    const score = answered === quiz.length
+      ? `<p class="note ${right === quiz.length ? "note-ok" : ""}" style="margin-bottom:18px">You got ${right} of ${quiz.length} right.
+           <button class="btn btn-small" id="quizReset" style="margin-left:8px">Try again</button></p>`
+      : `<p class="hint" style="margin-bottom:18px">${answered} of ${quiz.length} answered</p>`;
+    $("pQuiz").innerHTML = score + quiz.map((q, i) => {
+      const picked = quizState[i];
+      const opts = q.options.map((o, j) => {
+        const cls = picked === null ? "" : j === q.answer ? "right" : j === picked ? "wrong" : "";
+        return `<button class="quiz-opt ${cls}" data-q="${i}" data-o="${j}" ${picked !== null ? "disabled" : ""}>${esc(o)}</button>`;
+      }).join("");
+      const after = picked === null ? "" : `<p class="small muted" style="margin-top:8px">${picked === q.answer ? "Correct. " : "Not quite. "}${esc(q.explanation)}
+        ${q.page ? `<button type="button" class="cite" data-page="${q.page}">p. ${q.page}</button>` : ""}</p>`;
+      return `<article class="claim"><p class="claim-text">${i + 1}. ${esc(q.question)}</p>${opts}${after}</article>`;
+    }).join("");
+    $("pQuiz").querySelectorAll(".quiz-opt").forEach(b => b.addEventListener("click", () => {
+      quizState[+b.dataset.q] = +b.dataset.o; renderQuiz(pr);
+    }));
+    $("quizReset")?.addEventListener("click", () => { quizState = []; renderQuiz(pr); });
+  }
+
+  function renderAll() {
+    const ins = SS.get("insights"), pr = SS.get("practice");
+    if (ins) { renderClaims(ins); renderTerms(ins); }
+    else {
+      starter("pClaims", "Claims and evidence", "Find the paper's main claims, quote the evidence for each, and rate how well it holds up.", "Find the claims", buildInsights);
+      starter("pTerms", "Key terms", "The technical terms you need to follow this paper, defined the way the paper uses them.", "Build the glossary", buildInsights);
+    }
+    if (pr) { renderCards(pr); renderQuiz(pr); }
+    else {
+      starter("pCards", "Flashcards", "Short question and answer cards on the problem, method, setup, numbers and limitations.", "Make flashcards", buildPractice);
+      starter("pQuiz", "Quiz", "Multiple-choice questions to check what you remember. Each one points to the page with the answer.", "Make a quiz", buildPractice);
+    }
+  }
+
+  if (requirePaper()) { wireTabs($("studyTabs")); renderAll(); }
+</script>
+{% endblock %}

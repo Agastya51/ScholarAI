@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}Run everything · ScholarAI{% endblock %}
+{% block content %}
+
+<header class="page-head">
+  <h1>Run everything</h1>
+  <p>Say what you want done. A coordinator decides which specialists to call (reader, figure analyst, literature
+    scout, comparator, review panel, editor) and you watch the work as it happens.</p>
+</header>
+
+<div id="noPaper" class="panel empty hidden">
+  <h2>No paper open</h2>
+  <p>Upload a paper to run a full analysis on it.</p>
+  <a class="btn btn-primary" href="/">Upload a paper</a>
+</div>
+
+<div id="mainContent">
+  <div class="panel">
+    <label class="label" for="goalInput">What should be done?</label>
+    <textarea id="goalInput" class="field" rows="2">Full analysis: summary, related work, peer review, and improved rewrites</textarea>
+    <div class="starters" style="margin-top:10px">
+      <button type="button" class="starter goal-preset">Full analysis: summary, related work, peer review, and improved rewrites</button>
+      <button type="button" class="starter goal-preset">Peer review the paper as a conference reviewer would</button>
+      <button type="button" class="starter goal-preset">Position the paper against recent related work</button>
+      <button type="button" class="starter goal-preset">Improve the writing of the weakest sections</button>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn btn-primary" id="startBtn">Start</button>
+      <label class="check" title="Pause so you can approve the search keywords and pick which rewrites to keep">
+        <input type="checkbox" id="hitlCheck" checked/> Ask me before searching and before keeping rewrites
+      </label>
+      <span id="runStatus"></span>
+    </div>
+  </div>
+
+  <div class="panel hidden" id="interruptCard" style="border-color:var(--warn)">
+    <h2 class="section" style="margin-top:0">Your decision is needed</h2>
+    <p id="interruptMsg" class="muted" style="margin-bottom:12px"></p>
+    <div id="interruptBody"></div>
+  </div>
+
+  <div class="panel hidden" id="liveCard">
+    <div class="row between">
+      <h2 class="section" style="margin:0">Work in progress</h2>
+      <span id="callCounter" class="hint"></span>
+    </div>
+    <div id="workerChips" class="steps" style="margin:12px 0"></div>
+    <div class="trace"><div class="trace-list" id="liveLog" style="max-height:380px"></div></div>
+  </div>
+
+  <div class="hidden" id="resultsCard">
+    <h2 class="section">Results</h2>
+    <div class="tabs" id="resultTabs"></div>
+    <div id="resultBody" class="prose wide"></div>
+    <div class="row end" style="margin-top:24px"><a class="btn btn-primary" href="/download">Export the results</a></div>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+  const WORKERS = ["reader", "figure_analyst", "literature_scout", "comparator", "review_panel", "editor"];
+  let threadId = null, completed = [];
+
+  // POST and consume a Server-Sent Events stream
+  async function streamPost(url, body, onEvent) {
+    let res;
+    try {
+      res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    } catch { throw new Error("Could not reach the server. Check that it is running and try again."); }
+    if (!res.ok) {
+      let d = {}; try { d = await res.json(); } catch {}
+      throw new Error(friendlyError(d.error || `Server error (${res.status})`));
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (line.startsWith("data: ")) onEvent(JSON.parse(line.slice(6)));
+      }
+    }
+  }
+
+  function renderChips(active) {
+    $("workerChips").innerHTML = WORKERS.map(w => {
+      const done = completed.includes(w), on = w === active;
+      return `<span class="tag ${done ? "tag-ok" : on ? "tag-hl" : ""}">${esc(w.replace("_", " "))}${done ? ": done" : on ? ": working" : ""}</span>`;
+    }).join("");
+  }
+
+  function log(trace) {
+    const el = $("liveLog");
+    el.insertAdjacentHTML("beforeend", traceItemsHtml(trace));
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function onEvent(evt) {
+    if (evt.llm_calls != null) $("callCounter").textContent = `${plural(evt.llm_calls, "model call")} so far in this stage`;
+    if (evt.type === "start") threadId = evt.thread_id;
+    if (evt.type === "step") {
+      log(evt.trace);
+      const decision = (evt.trace || []).find(e => e.agent === "supervisor");
+      if (decision) renderChips(decision.detail.split(" ")[0]);
+      if (WORKERS.includes(evt.node) && !completed.includes(evt.node)) completed.push(evt.node);
+      if (evt.node === "meta_review" && !completed.includes("review_panel")) completed.push("review_panel");
+    }
+    if (evt.type === "interrupt") showInterrupt(evt.payload);
+    if (evt.type === "done") {
+      renderChips(null);
+      persist(evt.result);
+      showResults(evt.result);
+      say("runStatus", "ok", "Finished");
+    }
+    if (evt.type === "error") say("runStatus", "bad", friendlyError(evt.error));
+  }
+
+  async function run(url, body) {
+    setBtn("startBtn", true, "Working…");
+    $("interruptCard").classList.add("hidden");
+    try {
+      await streamPost(url, body, onEvent);
+    } catch (e) {
+      say("runStatus", "bad", e.message);
+    }
+    setBtn("startBtn", false, "Start");
+  }
+
+  function startRun() {
+    completed = [];
+    $("liveLog").innerHTML = "";
+    say("runStatus", "", "");
+    $("resultsCard").classList.add("hidden");
+    $("liveCard").classList.remove("hidden");
+    renderChips(null);
+    run("/analyze", { goal: $("goalInput").value.trim(), hitl: $("hitlCheck").checked });
+  }
+
+  function resume(value) {
+    log([{ agent: "you", kind: "human", detail: JSON.stringify(value) }]);
+    run("/analyze/resume", { thread_id: threadId, resume: value });
+  }
+
+  function showInterrupt(p) {
+    $("interruptMsg").textContent = p.message || "";
+    const body = $("interruptBody");
+    if (p.type === "approve_keywords") {
+      body.innerHTML = `
+        <label class="label" for="kwInput">Search keywords</label>
+        <input id="kwInput" class="field" value="${esc(p.topic)}"/>
+        <div class="row" style="margin-top:12px">
+          <button class="btn btn-primary" id="kwGo">Search with these keywords</button>
+          <button class="btn" id="kwSkip">Skip the literature search</button>
+        </div>`;
+      $("kwGo").addEventListener("click", () => resume({ topic: $("kwInput").value }));
+      $("kwSkip").addEventListener("click", () => resume({ skip: true }));
+    } else if (p.type === "review_edits") {
+      body.innerHTML = (p.edits || []).map((e, i) => {
+        const ok = e.verification && e.verification.status === "verified";
+        return `<label class="item" style="display:block;cursor:pointer">
+          <span class="row"><input type="checkbox" class="editChk" value="${i}" ${ok ? "checked" : ""}/>
+            <b>${esc(e.section)}</b><span class="tag ${ok ? "tag-ok" : "tag-bad"}">${ok ? "Fact-checked" : "Needs your check"}</span></span>
+          <span class="muted" style="display:block;margin-top:6px;font:15.5px/1.6 var(--serif)">${esc(String(e.rewritten || "").slice(0, 600))}</span>
+        </label>`;
+      }).join("") + `<button class="btn btn-primary" id="editsGo" style="margin-top:12px">Keep the ticked rewrites</button>`;
+      $("editsGo").addEventListener("click", () =>
+        resume({ accepted: [...document.querySelectorAll(".editChk:checked")].map(c => +c.value) }));
+    }
+    $("interruptCard").classList.remove("hidden");
+    $("interruptCard").scrollIntoView({ block: "center" });
+  }
+
+  // Share the results with the other pages (Related work / Improve / Review / Export)
+  function persist(r) {
+    SS.set("analysis", r);
+    if (r.summary) SS.set("summary", r.summary);
+    if (r.vision) SS.set("vision", r.vision);
+    if (r.topic) SS.set("topic", r.topic);
+    if (r.papers) SS.set("papers", r.papers);
+    if (r.comparison) SS.set("comparison", r.comparison);
+    if (r.improvements) SS.set("improvements", r.improvements);
+    if (r.edits) SS.set("edits", r.edits);
+    if (r.reviews) SS.set("review", { reviews: r.reviews, meta_review: r.meta_review || {}, review_markdown: r.review_markdown || "", trace: [] });
+    refreshNav();
+  }
+
+  function showResults(r) {
+    const tabs = [
+      ["Summary", r.summary],
+      ["Figures", (r.vision || []).join("\n\n---\n\n")],
+      ["Related work", (r.papers || []).map(p => `- **${p.title}** (${p.year || "n.d."}${p.venue ? ", " + p.venue : ""}) [open](${p.link})`).join("\n")
+        + (r.queries_tried && r.queries_tried.length > 1 ? `\n\n*Searches tried:* ${r.queries_tried.join(", then ")}` : "")],
+      ["Comparison", r.comparison],
+      ["Peer review", r.review_markdown],
+      ["Rewrites", (r.edits || []).map(e => `### ${e.section}\n\n*${e.verification && e.verification.status === "verified" ? "Fact-checked" : "Needs your check"}*\n\n${e.rewritten}`).join("\n\n")],
+    ].filter(t => t[1]);
+    if (!tabs.length) return;
+    const tabsEl = $("resultTabs");
+    tabsEl.innerHTML = tabs.map((t, i) => `<button class="tab" data-i="${i}">${t[0]}</button>`).join("");
+    const show = i => {
+      $("resultBody").innerHTML = md(tabs[i][1]);
+      tabsEl.querySelectorAll(".tab").forEach((b, j) => b.classList.toggle("active", j === i));
+    };
+    tabsEl.querySelectorAll(".tab").forEach(b => b.addEventListener("click", () => show(+b.dataset.i)));
+    show(0);
+    $("resultsCard").classList.remove("hidden");
+  }
+
+  $("startBtn").addEventListener("click", startRun);
+  document.querySelectorAll(".goal-preset").forEach(b => b.addEventListener("click", () => $("goalInput").value = b.textContent));
+  if (requirePaper()) {
+    const savedRun = SS.get("analysis");
+    if (savedRun) showResults(savedRun);
+  }
+</script>
+{% endblock %}
