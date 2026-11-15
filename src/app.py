@@ -15,7 +15,7 @@ from src.figures import explain_figure, explain_paper_figure, public_figure
 from src.llm import track_usage, LLMError
 from src.rag import get_embedder, load_paper, library, sessions, set_session, use_session, current_session_id
 from src.viewer import page_view
-from src.workflows import upload_graph, compare_graph, improve_graph, qa_simple_graph
+from src.workflows import prepare_graph, compare_graph, improve_graph, qa_simple_graph
 from src.agents.qa_agent import answer_question
 from src.agents.review_panel import review_graph
 from src.agents.supervisor import stream_analysis
@@ -195,24 +195,31 @@ def page_benchmarks():
 # =========================
 # API ENDPOINTS
 # =========================
+def _paper_stats(paper) -> dict:
+    return {"pages": paper.pages, "sections": len(paper.sections()), "chunks": len(paper.chunks),
+            "figures": len(paper.figures), "tables": len(paper.tables), "captions": len(paper.captions),
+            "references": len(paper.references), "embedding_cache_hit": paper.cache_hit}
+
 @app.route("/upload", methods=["POST"])
 @agent_endpoint
 def upload():
+    """Step 1 of opening a paper: parse and index it (no language-model calls, so it is quick and cannot hit
+    a rate limit). The browser then calls /api/prepare for the summary; figures are explained on demand."""
     paper = _index_upload(make_active=True)
-    result = upload_graph.invoke({"paper_id": paper.id, "trace": []})
-    return {
-        "paper_id": paper.id,
-        "title": paper.title,
-        "stats": {"pages": paper.pages, "sections": len(paper.sections()), "chunks": len(paper.chunks),
-                  "figures": len(paper.figures), "tables": len(paper.tables),
-                  "captions": len(paper.captions), "references": len(paper.references),
-                  "embedding_cache_hit": paper.cache_hit},
-        "summary": result["summary"],
-        "vision": result["vision"],
-        "figures": _figures_payload(paper),
-        "topic": result["topic"],
-        "trace": result.get("trace", []),
-    }
+    return {"paper_id": paper.id, "title": paper.title, "stats": _paper_stats(paper),
+            "figures": _figures_payload(paper), "trace": []}
+
+@app.route("/api/prepare", methods=["POST"])
+@agent_endpoint
+def prepare():
+    """Step 2: grounded summary and search keywords for the active paper (cached on the paper)."""
+    paper = _require_paper(_json().get("paper_id"))
+    if paper.summary and getattr(paper, "topic", ""):
+        return {"paper_id": paper.id, "summary": paper.summary, "topic": paper.topic, "trace": []}
+    result = prepare_graph.invoke({"paper_id": paper.id, "trace": []})
+    paper.topic = result["topic"]
+    return {"paper_id": paper.id, "summary": result["summary"], "topic": result["topic"],
+            "trace": result.get("trace", [])}
 
 @app.route("/ask", methods=["POST"])
 @agent_endpoint

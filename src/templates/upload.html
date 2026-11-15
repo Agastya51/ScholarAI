@@ -19,7 +19,7 @@
     <button class="btn btn-primary" id="uploadBtn" disabled>Read this paper</button>
     <span id="uploadStatus"></span>
   </div>
-  <p class="hint hidden" id="uploadWait" style="margin-top:10px">This usually takes under a minute. The paper is being parsed, indexed and summarised, and its first figures explained.</p>
+  <p class="hint hidden" id="uploadWait" style="margin-top:10px">Reading the layout, tables and figures, and building the search index. This takes a few seconds to a minute.</p>
 
   <div class="promise">
     <div><h3>Answers you can check</h3><p>Click any page reference to open that page of the PDF with the exact passage highlighted.</p></div>
@@ -83,17 +83,38 @@
       .filter(f => f[0]).map(f => `<li><b>${f[0]}</b> ${f[1]}${f[0] === 1 ? "" : "s"}</li>`);
     if (SS.str("topic")) facts.push(`<li>Keywords: <b>${esc(SS.str("topic"))}</b></li>`);
     $("paperFacts").innerHTML = facts.join("");
-    $("nextFigures").textContent = st.figures ? `${plural(st.figures, "figure")} found, each explained in context` : "No figures were found in this paper";
+    $("nextFigures").textContent = st.figures ? `${plural(st.figures, "figure")} found. Each is explained with the text that discusses it` : "No figures were found in this paper";
     const tr = SS.get("uploadTrace");
     $("uploadTrace").innerHTML = tr ? renderTrace(tr.trace, tr.calls) : "";
     showLevel("summary");
+  }
+
+  // Step 2 of opening a paper: the summary is written in its own request, after the paper is indexed
+  async function prepare() {
+    $("summaryOut").innerHTML = `<div class="working"><span class="spinner"></span> Writing a summary grounded in the paper…</div>`;
+    say("levelStatus", "", "");
+    try {
+      const data = await postJSON("/api/prepare", { paper_id: SS.str("paper_id") });
+      SS.set("summary", data.summary);
+      SS.set("topic", data.topic);
+      SS.set("uploadTrace", { trace: data.trace || [], calls: data.llm_calls });
+      showState();
+    } catch (e) {
+      $("summaryOut").innerHTML = `<p class="note note-bad">${esc(e.message)}</p>
+        <button class="btn" style="margin-top:12px" onclick="prepare()">Write the summary again</button>`;
+    }
   }
 
   async function showLevel(level) {
     current = level;
     document.querySelectorAll("#levelSeg button").forEach(b => b.classList.toggle("active", b.dataset.level === level));
     say("levelStatus", "", "");
-    if (level === "summary") { $("summaryOut").innerHTML = md(SS.str("summary")); return; }
+    if (level === "summary") {
+      if (SS.str("summary")) $("summaryOut").innerHTML = md(SS.str("summary"));
+      else prepare();
+      return;
+    }
+    if (!SS.str("summary")) { say("levelStatus", "warn", "Wait for the summary first."); showLevel("summary"); return; }
     const cache = SS.get("explain") || {};
     if (!cache[level]) {
       $("summaryOut").innerHTML = `<div class="working"><span class="spinner"></span> Rewriting the explanation for this reader…</div>`;
@@ -142,11 +163,7 @@
       SS.set("paper_id", data.paper_id);
       SS.set("title", data.title);
       SS.set("stats", data.stats || {});
-      SS.set("uploadTrace", { trace: data.trace || [], calls: data.llm_calls });
-      SS.set("summary", data.summary);
-      SS.set("vision", data.vision || []);
       SS.set("figures", data.figures || []);
-      SS.set("topic", data.topic);
       selectedFile = null;
       refreshNav();
       showState();

@@ -240,7 +240,7 @@ The tests use a scripted fake LLM and a toy embedder, so they need no Groq key. 
 ## ☁️ Deployment (Render or any host that runs a Procfile)
 
 1. Push the repository to GitHub.
-2. Create a **Web Service** from the repo. Build command: `pip install -r requirements.txt`. Start command: taken from `Procfile`.
+2. Create a **Web Service** from the repo. Build command: `pip install -r requirements.txt`. Start command (the same as in `Procfile`): `gunicorn --workers 1 --threads 1 --timeout 600 --bind 0.0.0.0:$PORT src.app:app`.
 3. Set environment variables: `GROQ_API_KEY` (required), `FLASK_DEBUG=False`. `PORT` is provided by the host.
 4. Set the health-check path to `/health`.
 
@@ -251,6 +251,7 @@ Things to know:
 - **A restart clears uploads.** Users re-upload their paper; if the disk survived, the embedding cache makes that fast.
 - **One request at a time.** The default single-threaded worker protects a 512 MB instance; a long `/analyze` run makes other users wait. Raise `--threads` only on a larger instance.
 - Leave `RERANK_MODE=none` on small instances; the cross-encoder loads a second model.
+- Opening a paper is split into steps so no single request is long: the upload only parses and indexes (no model calls), the summary is a second request, and figures are explained when opened. PyMuPDF 2.x's neural layout analyser is switched off because it is slow and memory-hungry on a small CPU; ruled and booktabs-style tables are found without it.
 
 ---
 

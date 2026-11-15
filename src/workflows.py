@@ -496,6 +496,17 @@ def build_upload_graph():
     g.add_edge("extract_topic", END)
     return g.compile()
 
+def build_prepare_graph():
+    """Summary and search keywords only. Used right after an upload; figures are explained on demand, so a
+    single request never has to wait for every figure on a slow instance."""
+    g = StateGraph(PaperState)
+    g.add_node("summarize", node_summarize)
+    g.add_node("extract_topic", node_extract_topic)
+    g.add_edge(START, "summarize")
+    g.add_edge("summarize", "extract_topic")
+    g.add_edge("extract_topic", END)
+    return g.compile()
+
 def build_compare_graph(include_compare: bool = True):
     """Self-correcting literature search; with include_compare=False it stops after the search loop."""
     g = StateGraph(PaperState)
@@ -535,6 +546,7 @@ def build_qa_simple_graph():
     return g.compile()
 
 upload_graph    = build_upload_graph()
+prepare_graph   = build_prepare_graph()
 compare_graph   = build_compare_graph()
 search_graph    = build_compare_graph(include_compare=False)
 improve_graph   = build_improve_graph()

@@ -196,23 +196,33 @@ class TestAppSessions(unittest.TestCase):
         self.assertEqual(app.test_client().get("/papers").get_json()["papers"], [])
 
     def test_full_upload_flow_returns_stats(self):
-        def responder(messages, tools, json_mode):
-            return "graph neural networks, traffic forecasting" if "Extract 3-4" in messages[-1]["content"] else "## TLDR\nsummary"
-
-        set_backend(FakeLLM(responder))
-        client = app.test_client()
+        fake = FakeLLM(lambda messages, tools, json_mode: "graph neural networks, traffic forecasting"
+                       if "Extract 3-4" in messages[-1]["content"] else "## TLDR\nsummary")
+        set_backend(fake)
         seen = []
         set_vision_backend(lambda path, prompt, max_tokens: seen.append(prompt) or "**What it is** - a diagram.")
+        client = app.test_client()
         with patch("src.app.load_paper", _offline_load_paper):
             data = self._upload(client, "/upload").get_json()
+        # Step 1 only parses and indexes: no model calls at all
+        self.assertEqual((fake.calls, seen, data["llm_calls"]), ([], [], 0))
         self.assertEqual(data["stats"]["pages"], 3)
         self.assertEqual(data["stats"]["tables"], 1)
         self.assertEqual(data["stats"]["references"], 3)
         self.assertEqual(data["stats"]["figures"], 2)
-        self.assertIn("Architecture of FlowNet-X", seen[0])                 # the caption reached the vision model
-        self.assertIn("Forecast error versus prediction horizon", seen[1])  # ...also when it is on the next page
-        self.assertIn("Architecture of FlowNet-X", data["vision"][0])
-        self.assertEqual(data["topic"], "graph neural networks, traffic forecasting")
+        self.assertEqual([f["id"] for f in data["figures"]], ["fig1", "fig2"])
+        # Step 2 writes the summary and keywords, and caches them
+        prep = client.post("/api/prepare", json={"paper_id": data["paper_id"]}).get_json()
+        self.assertEqual(prep["topic"], "graph neural networks, traffic forecasting")
+        self.assertIn("summary", prep["summary"])
+        self.assertEqual(prep["llm_calls"], 2)
+        again = client.post("/api/prepare", json={"paper_id": data["paper_id"]}).get_json()
+        self.assertEqual(again["llm_calls"], 0)
+        # Figures are explained on demand, with their captions (also when the caption is on the next page)
+        client.post("/api/figures/fig1/explain", json={})
+        client.post("/api/figures/fig2/explain", json={})
+        self.assertIn("Architecture of FlowNet-X", seen[0])
+        self.assertIn("Forecast error versus prediction horizon", seen[1])
 
     def test_non_pdf_content_is_rejected_and_not_left_on_disk(self):
         client = app.test_client()

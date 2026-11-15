@@ -29,6 +29,13 @@ except ImportError:
 import faiss
 import numpy as np
 
+# PyMuPDF 2.x ships an optional neural layout analyser (ONNX, sometimes multi-process) that find_tables() and
+# get_layout() use by default. On a small CPU-limited instance it takes seconds per page and a lot of memory,
+# so it is switched off: tables are found from their ruling lines, which is what this parser was built for.
+if hasattr(fitz, "_layout_enabled"):
+    fitz._layout_enabled = False
+os.environ.setdefault("PYMUPDF_SUGGEST_LAYOUT_ANALYZER", "0")
+
 from src.figures import MAX_FIGURES, attach_mentions, locate_figures
 from src.config import (
     EMBEDDING_DIM, EMBEDDING_MODEL_NAME, FALLBACK_EMBEDDING_MODEL_NAME, QUERY_INSTRUCTION,
@@ -514,15 +521,131 @@ def _nearest_caption(bbox, captions: List[dict]) -> Optional[dict]:
 
     return min(captions, key=cost)
 
-def table_rows(page, table) -> List[List[str]]:
-    """Cell texts of a detected table, read straight from each cell's rectangle.
+class RuleTable:
+    """A table found from horizontal rules only (LaTeX booktabs style), with its cell texts already read."""
+    def __init__(self, bbox, rows_text: List[List[str]]):
+        self.bbox = tuple(bbox)
+        self.rows_text = rows_text
+        self.row_count = len(rows_text)
+        self.col_count = max((len(r) for r in rows_text), default=0)
 
-    PyMuPDF's own Table.extract() can detach low glyphs such as '.' and '-' from their word
-    (observed: '3.60' -> '360\n.'), which silently corrupts numbers; reading the cell box avoids that.
+def _horizontal_rules(drawings) -> List[tuple]:
+    rules = []
+    for d in drawings:
+        r = d.get("rect")
+        if r is not None and r.height <= 2.0 and r.width >= 40:
+            rules.append((r.x0, (r.y0 + r.y1) / 2, r.x1))
+    return sorted(rules, key=lambda r: r[1])
+
+def _split_columns(rows: List[List[tuple]], min_gap: float = 7.0) -> List[float]:
+    """x positions that separate columns: gaps that no word in any row crosses."""
+    spans = sorted((w[0], w[2]) for row in rows for w in row)
+    if not spans:
+        return []
+    cuts, reach = [], spans[0][1]
+    for x0, x1 in spans[1:]:
+        if x0 - reach >= min_gap:
+            cuts.append((reach + x0) / 2)
+        reach = max(reach, x1)
+    return cuts
+
+def booktabs_tables(page, drawings, exclude: List[tuple] = ()) -> List[RuleTable]:
+    """Tables delimited by horizontal rules of equal width (top rule, header rule, bottom rule) and no
+    vertical lines. Rows are text lines; columns are the gaps that run through every row."""
+    rules = _horizontal_rules(drawings)
+    groups: List[List[tuple]] = []
+    for r in rules:
+        g = next((g for g in groups if abs(g[-1][0] - r[0]) <= 3 and abs(g[-1][2] - r[2]) <= 3
+                  and r[1] - g[-1][1] <= 260), None)
+        if g is None:
+            groups.append([r])
+        elif r[1] - g[-1][1] > 1.5:            # ignore double-drawn rules
+            g.append(r)
+    out = []
+    words = page.get_text("words")
+    for g in groups:
+        if len(g) < 2:
+            continue
+        box = (g[0][0] - 2, g[0][1], g[0][2] + 2, g[-1][1])
+        if box[3] - box[1] < 20 or any(_inside(box, ex, 0.5) for ex in exclude):
+            continue
+        inside = [w for w in words if box[0] <= (w[0] + w[2]) / 2 <= box[2] and box[1] <= (w[1] + w[3]) / 2 <= box[3]]
+        lines: List[List[tuple]] = []
+        for w in sorted(inside, key=lambda w: ((w[1] + w[3]) / 2, w[0])):
+            mid = (w[1] + w[3]) / 2
+            if lines and abs((lines[-1][0][1] + lines[-1][0][3]) / 2 - mid) <= 3:
+                lines[-1].append(w)
+            else:
+                lines.append([w])
+        if len(lines) < 2:
+            continue
+        cuts = _split_columns(lines)
+        if not cuts:
+            continue
+        rows_text = []
+        for line in lines:
+            cells = [""] * (len(cuts) + 1)
+            for w in sorted(line, key=lambda w: w[0]):
+                col = sum((w[0] + w[2]) / 2 > c for c in cuts)
+                cells[col] = (cells[col] + " " + w[4]).strip()
+            rows_text.append([re.sub(r"\s+", " ", clean_text(c)).strip() for c in cells])
+        if len(rows_text) >= 2 and len(rows_text[0]) >= 2:
+            out.append(RuleTable(box, rows_text))
+    return out
+
+def find_ruled_tables(page, has_table_caption: bool = True) -> list:
+    """Tables drawn with ruling lines (the common case in papers), without PyMuPDF's neural layout stage.
+
+    1. PyMuPDF's line-based finder (full grids).
+    2. On pages with a table caption, tables delimited by horizontal rules only (LaTeX booktabs).
+    Pages with no vector drawings cannot hold a ruled table and are skipped without calling the finder.
     """
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return []
+    if not drawings:
+        return []
+    tables: list = []
+    try:
+        try:
+            found = page.find_tables(use_layout=False)
+        except TypeError:                      # PyMuPDF < 2.0 has no use_layout switch (and no layout stage)
+            found = page.find_tables()
+        tables = [t for t in found.tables if t.row_count >= 2 and t.col_count >= 2]
+    except Exception:
+        tables = []
+    if has_table_caption:
+        try:
+            tables += booktabs_tables(page, drawings, exclude=[tuple(t.bbox) for t in tables])
+        except Exception:
+            pass
+    return tables
+
+def table_rows(page, table) -> List[List[str]]:
+    """Cell texts of a detected table.
+
+    The page's words are read once and each word is placed in the cell that contains its centre.
+    (PyMuPDF's own Table.extract() can detach low glyphs such as '.' from their word, turning '3.60'
+    into '360' + '.', and reading every cell with get_textbox() rescans the whole page per cell.)
+    """
+    if isinstance(table, RuleTable):
+        return table.rows_text
+    try:
+        words = page.get_text("words", clip=fitz.Rect(table.bbox))
+    except Exception:
+        words = []
     rows = []
     for row in table.rows:
-        cells = [re.sub(r"\s+", " ", clean_text(page.get_textbox(c))).strip() if c else "" for c in row.cells]
+        cells = []
+        for c in row.cells:
+            if not c:
+                cells.append("")
+                continue
+            x0, y0, x1, y1 = c
+            inside = [w for w in words if x0 <= (w[0] + w[2]) / 2 <= x1 and y0 <= (w[1] + w[3]) / 2 <= y1]
+            inside.sort(key=lambda w: (w[5], w[6], w[7]))          # block, line, word order
+            cells.append(re.sub(r"\s+", " ", clean_text(" ".join(w[4] for w in inside))).strip())
         if any(cells):
             rows.append(cells)
     return rows
@@ -574,13 +697,8 @@ def _parse_pages(doc, figure_dir: str, max_images: int) -> dict:
     for page_no, page in enumerate(doc, start=1):
         info: dict = {}
         blocks = ordered_blocks(page, info)
-        page_tables = []
-        try:
-            for t in page.find_tables().tables:
-                if t.row_count >= 2 and t.col_count >= 2:
-                    page_tables.append(t)
-        except Exception:
-            pass
+        has_table_caption = any((detect_caption(b["text"]) or {}).get("kind") == "table" for b in blocks)
+        page_tables = find_ruled_tables(page, has_table_caption)
         # A "table" that covers most of the page is usually a mis-detected layout: keep the prose in that case
         page_area = max(1.0, page.rect.width * page.rect.height)
         table_boxes = [tuple(t.bbox) for t in page_tables]
@@ -804,6 +922,7 @@ class Paper:
     figure_modes: Dict[str, str] = field(default_factory=dict)     # "vision" | "text-only" per analysed figure
     study: Dict[str, object] = field(default_factory=dict)         # cached study material (src/study.py)
     summary: str = ""
+    topic: str = ""
     profile: Optional[dict] = None
     captions: List[dict] = field(default_factory=list)
     references: List[dict] = field(default_factory=list)

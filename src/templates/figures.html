@@ -15,6 +15,10 @@
 </div>
 
 <div id="mainContent">
+  <div class="row hidden" id="allBar" style="margin-bottom:22px">
+    <button class="btn btn-primary" id="allBtn">Explain all figures</button>
+    <span class="hint" id="allHint">Figures are explained one at a time, so you can start reading the first while the rest are done.</span>
+  </div>
   <div id="figList"><div class="working"><span class="spinner"></span> Loading figures…</div></div>
 </div>
 
@@ -64,6 +68,19 @@
       return;
     }
     $("figList").innerHTML = figures.map(cardHtml).join("");
+    $("allBar").classList.toggle("hidden", !figures.some(f => !f.analysis));
+  }
+
+  async function explainAll() {
+    const todo = figures.filter(f => !f.analysis).map(f => f.id);
+    $("allBtn").disabled = true;
+    for (const [i, id] of todo.entries()) {
+      $("allBtn").innerHTML = `<span class="spinner"></span> Explaining ${i + 1} of ${todo.length}…`;
+      await explain(id);
+    }
+    $("allBtn").disabled = false;
+    $("allBtn").textContent = "Explain all figures";
+    $("allBar").classList.toggle("hidden", !figures.some(f => !f.analysis));
   }
 
   async function explain(id, retry) {
@@ -98,6 +115,7 @@
     setBtn("askbtn-" + id, false, "Ask");
   }
 
+  $("allBtn").addEventListener("click", explainAll);
   document.addEventListener("click", e => {
     const ex = e.target.closest("[data-explain]");
     if (ex) explain(ex.dataset.explain, ex.dataset.retry);

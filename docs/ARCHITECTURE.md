@@ -41,7 +41,7 @@ How the system is put together. For the overview see the [README](../README.md);
 
 **Pass A: layout.** For each page:
 - Text blocks are put in reading order by `ordered_blocks()`. A page counts as two-column when enough narrow blocks sit on each side of the centre; it is then read band by band (bands are separated by full-width blocks such as the title, abstract or a wide figure), left column before right column. Lines that PyMuPDF split on wide gaps (for example `3.1` and `Training Details`) are joined back.
-- Tables are found with `page.find_tables()`. Cell text is read from each cell's rectangle, because the library's own extraction can detach a decimal point from its number. A "table" covering most of the page is treated as a mis-detection.
+- Tables are found from their ruling lines, only on pages that contain vector drawings: PyMuPDF's line-based finder for full grids, and, on pages with a table caption, a finder for LaTeX booktabs tables (horizontal rules only; rows are text lines, columns are the gaps that run through every row). PyMuPDF 2.x's neural layout analyser is switched off because it is slow and memory-hungry on a small CPU. Cell text is assembled from the page's words by position, because the library's own extraction can detach a decimal point from its number. A "table" covering most of the page is treated as a mis-detection.
 - Captions (`Fig. 3.`, `Figure 3:`, `TABLE II`) are recognised; prose that merely mentions a figure is not.
 
 **Figures** (`src/figures.py`, see section 5) are located next, because the second pass needs to know where they are.
@@ -91,7 +91,7 @@ question
 
 | Feature | Route | Module | Pattern |
 | --- | --- | --- | --- |
-| Upload | `POST /upload` | `workflows.py` | Graph: summarise (targeted retrieval over abstract, method, results, conclusions) → explain the first figures → extract search keywords |
+| Open a paper | `POST /upload`, then `POST /api/prepare` | `app.py`, `workflows.py` | Upload parses and indexes only (no model calls). Prepare runs a graph: summarise (targeted retrieval over abstract, method, results, conclusions) → extract search keywords. Figures are explained on demand |
 | Quick answer | `POST /ask` (`mode=simple`) | `workflows.py` | Retrieval pipeline + one grounded answer call, with confidence and grounding report |
 | Thorough answer | `POST /ask` (`mode=agent`) | `agents/qa_agent.py` | ReAct tool loop over `search_paper`, `get_section`, `get_table`, `analyze_figure`, `get_reference`, external literature tools; capped iterations; conversation memory |
 | Related work | `POST /compare` | `workflows.py` | Search four databases → LLM relevance grader → reformulate keywords if too few are relevant (max 3 attempts) → comparative study |

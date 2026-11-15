@@ -18,6 +18,31 @@ from tests.pdf_factory import build_two_column_pdf
 
 SAMPLE_PAPER = os.path.join(os.path.dirname(__file__), "..", "evals", "sample", "sample_paper.pdf")
 
+class TestFastParsing(unittest.TestCase):
+    def test_neural_layout_stage_is_off(self):
+        from src import rag   # importing the parser switches it off
+        self.assertTrue(hasattr(rag, "find_ruled_tables"))
+        if hasattr(fitz, "_layout_enabled"):
+            self.assertFalse(fitz._layout_enabled)
+
+    def test_pages_without_drawings_skip_the_table_finder(self):
+        from unittest.mock import MagicMock
+        from src.rag import find_ruled_tables
+        page = MagicMock()
+        page.get_drawings.return_value = []
+        self.assertEqual(find_ruled_tables(page), [])
+        page.find_tables.assert_not_called()
+
+    def test_sample_paper_parses_quickly(self):
+        import time
+        if not os.path.exists(SAMPLE_PAPER):
+            self.skipTest("sample paper not present")
+        tmp = tempfile.mkdtemp()
+        start = time.time()
+        parse_document(SAMPLE_PAPER, figure_dir=tmp)
+        shutil.rmtree(tmp, ignore_errors=True)
+        self.assertLess(time.time() - start, 1.5)   # was about 2 s with the neural table finder
+
 class TestTextCleaning(unittest.TestCase):
     def test_ligatures_and_hyphenation(self):
         self.assertEqual(clean_text("eﬃcient traﬃc ﬂow"), "efficient traffic flow")
@@ -145,8 +170,10 @@ class TestLatexSamplePaper(unittest.TestCase):
         self.assertLess(sections.index("1 Introduction"), sections.index("2 Related Work"))
 
     def test_tables_figures_references(self):
-        self.assertEqual(len(self.parsed["tables"]), 2)
+        self.assertEqual(len(self.parsed["tables"]), 2)              # booktabs: horizontal rules only
+        self.assertIn("|Model|RiverCity-200|HarborBay-310|", self.parsed["tables"][0]["markdown"])
         self.assertIn("|RecurNet [1]|3.62|2.11|", self.parsed["tables"][0]["markdown"])
+        self.assertIn("|Without gate|3.44|", self.parsed["tables"][1]["markdown"])
         self.assertEqual(self.parsed["tables"][0]["section"], "4 Experiments › 4.4 Main Results")
         self.assertEqual([f["label"] for f in self.parsed["figures"]], ["Figure 1", "Figure 2"])
         self.assertEqual(len(self.parsed["references"]), 7)
