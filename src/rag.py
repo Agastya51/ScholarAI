@@ -50,48 +50,93 @@ from src.config import (
 _embed_model = None
 _is_fastembed = False
 
+# Memory on a 512 MB instance. The transformer's working memory grows with batch x tokens^2, and ONNX Runtime's
+# arena keeps the largest block it ever allocated. Measured with a model of this size: 16 passages of 512 tokens
+# with the arena on took the process from ~250 MB to ~1.1 GB; 4 passages capped at 256 tokens with the arena off
+# stays near 280 MB.
+EMBED_BATCH = 4
+EMBED_MAX_TOKENS = 256
+EMBED_MAX_CHARS = 1200        # passages are ~900 characters; longer ones (tables) are cut for the vector only
+
+def _cap_tokens(model):
+    """Truncate inputs to EMBED_MAX_TOKENS (the tokenizer sits at different places across fastembed versions)."""
+    for owner in (model, getattr(model, "model", None)):
+        tok = getattr(owner, "tokenizer", None)
+        if tok is not None and hasattr(tok, "enable_truncation"):
+            try:
+                tok.enable_truncation(max_length=EMBED_MAX_TOKENS)
+            except Exception:
+                pass
+
 def get_embedder():
-    """Lazy-load the embedding model once for the whole process (ultra-low RAM footprint)."""
+    """Load the embedding model once for the whole process, set up for low memory."""
     global _embed_model, _is_fastembed
     if _embed_model is None:
         try:
             from fastembed import TextEmbedding
-            # BAAI/bge-small-en-v1.5: 384-dimensional ONNX model (<50MB RAM, threads=1 prevents OOM)
-            _embed_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, threads=1)
-            _is_fastembed = True
+            # BAAI/bge-small-en-v1.5: 384-dimensional quantised ONNX model; one thread, no memory arena
+            try:
+                model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, threads=1, enable_cpu_mem_arena=False)
+            except TypeError:
+                model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, threads=1)
+            _cap_tokens(model)
+            _embed_model, _is_fastembed = model, True
         except Exception as e:
             try:
                 from sentence_transformers import SentenceTransformer
                 _embed_model = SentenceTransformer(FALLBACK_EMBEDDING_MODEL_NAME)
+                _embed_model.max_seq_length = EMBED_MAX_TOKENS
                 _is_fastembed = False
             except Exception:
                 raise RuntimeError(f"Could not load embedding model: {e}")
     return _embed_model
 
+def release_memory():
+    """Give freed memory back to the operating system after a big job (parsing, indexing)."""
+    import gc
+    gc.collect()
+    try:
+        fitz.TOOLS.store_shrink(100)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
 def embedding_model_id() -> str:
     """Identifier baked into cache keys so a model change never reuses stale vectors."""
     get_embedder()
-    return EMBEDDING_MODEL_NAME if _is_fastembed else FALLBACK_EMBEDDING_MODEL_NAME
+    name = EMBEDDING_MODEL_NAME if _is_fastembed else FALLBACK_EMBEDDING_MODEL_NAME
+    return f"{name}|max{EMBED_MAX_TOKENS}"      # the token cap changes the vectors, so it is part of the cache key
 
 ProgressFn = Callable[[str], None]
-EMBED_BATCH = 8   # small batches keep peak memory flat on a 512 MB instance
 
 def _noop(_message: str):
     pass
 
+def _embed_batch(model, batch: List[str]) -> list:
+    if _is_fastembed:
+        return list(model.embed(batch, batch_size=len(batch)))
+    return list(model.encode(batch, batch_size=len(batch)))
+
 def encode(texts: List[str], progress: Optional[ProgressFn] = None) -> np.ndarray:
-    """Embed passages, reporting progress every batch."""
+    """Embed passages a few at a time, reporting progress. Passages are batched by length so short ones are not
+    padded up to a long neighbour; the result keeps the input order."""
+    if not texts:
+        return np.zeros((0, EMBEDDING_DIM), np.float32)
     model = get_embedder()
     progress = progress or _noop
-    out = []
-    for start in range(0, len(texts), EMBED_BATCH):
-        batch = texts[start:start + EMBED_BATCH]
-        if _is_fastembed:
-            out.extend(model.embed(batch, batch_size=EMBED_BATCH))
-        else:
-            out.extend(model.encode(batch))
-        progress(f"Building the search index: {min(start + EMBED_BATCH, len(texts))} of {len(texts)} passages")
-    return np.array(out, dtype=np.float32).reshape(len(texts), -1) if out else np.zeros((0, EMBEDDING_DIM), np.float32)
+    clipped = [t[:EMBED_MAX_CHARS] for t in texts]
+    order = sorted(range(len(clipped)), key=lambda i: len(clipped[i]))
+    vectors: List[Optional[np.ndarray]] = [None] * len(clipped)
+    for start in range(0, len(order), EMBED_BATCH):
+        idx = order[start:start + EMBED_BATCH]
+        for i, vec in zip(idx, _embed_batch(model, [clipped[i] for i in idx])):
+            vectors[i] = np.asarray(vec, dtype=np.float32)
+        progress(f"Building the search index: {min(start + EMBED_BATCH, len(order))} of {len(order)} passages")
+    return np.stack(vectors).astype(np.float32)
 
 def encode_query(texts: List[str]) -> np.ndarray:
     """Embed queries. bge models expect a retrieval instruction on the query side only."""

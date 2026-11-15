@@ -15,7 +15,7 @@ from src.config import (
 from src import study
 from src.figures import explain_figure, explain_paper_figure, public_figure
 from src.llm import track_usage, LLMError
-from src.rag import get_embedder, load_paper, library, sessions, set_session, use_session, current_session_id
+from src.rag import get_embedder, load_paper, release_memory, library, sessions, set_session, use_session, current_session_id
 from src.viewer import page_view
 from src.workflows import prepare_graph, compare_graph, improve_graph, qa_simple_graph
 from src.agents.qa_agent import answer_question
@@ -186,6 +186,7 @@ def _run_index_job(job: dict, paper_id: str, path: str, filename: str, make_acti
                                      progress=lambda msg: _set_job(job, stage=msg))
             finally:
                 _index_lock.release()
+                release_memory()
             _set_job(job, status="done", stage="Done", result=build_result(paper))
         except ValueError as e:
             _set_job(job, status="error", error=str(e))

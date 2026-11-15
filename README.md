@@ -251,6 +251,7 @@ Things to know:
 - **A restart clears uploads.** Users re-upload their paper; if the disk survived, the embedding cache makes that fast.
 - **One request at a time.** The default single-threaded worker protects a 512 MB instance; a long `/analyze` run makes other users wait. Raise `--threads` only on a larger instance.
 - Leave `RERANK_MODE=none` on small instances; the cross-encoder loads a second model.
+- Embeddings are computed 4 passages at a time, capped at 256 tokens, with ONNX Runtime's memory arena off. With 16 passages of up to 512 tokens the process peaked above 1.2 GB and Render's 512 MB instance restarted.
 - Opening a paper is split into steps so no single request is long: the upload starts a background job that parses and indexes the paper (no model calls) while the page polls it and shows progress, the summary is a second request, and figures are explained when opened. PyMuPDF 2.x's neural layout analyser is switched off because it is slow and memory-hungry on a small CPU; ruled and booktabs-style tables are found without it.
 
 ---

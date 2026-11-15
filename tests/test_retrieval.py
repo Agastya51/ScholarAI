@@ -250,3 +250,45 @@ class TestProductionEmbeddingPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLowMemoryEmbedding(unittest.TestCase):
+    """The embedder must work a few short passages at a time: a 512 MB instance ran out of memory otherwise."""
+
+    def test_batches_are_small_short_and_order_is_kept(self):
+        from unittest.mock import patch
+        import numpy as np
+        from src import rag
+
+        seen = []
+
+        class FakeModel:
+            def embed(self, batch, batch_size):
+                seen.append(list(batch))
+                for t in batch:
+                    yield np.full(4, float(len(t)), dtype=np.float32)
+
+        texts = ["x" * n for n in (5000, 10, 300, 40, 900, 2, 700)]
+        with patch.object(rag, "get_embedder", return_value=FakeModel()), patch.object(rag, "_is_fastembed", True):
+            out = rag.encode(texts)
+        self.assertTrue(all(len(b) <= rag.EMBED_BATCH for b in seen))
+        self.assertTrue(all(len(t) <= rag.EMBED_MAX_CHARS for b in seen for t in b))
+        self.assertEqual([int(v[0]) for v in out], [min(len(t), rag.EMBED_MAX_CHARS) for t in texts])
+        self.assertLessEqual(rag.EMBED_BATCH, 4)
+        self.assertLessEqual(rag.EMBED_MAX_TOKENS, 256)
+
+    def test_token_cap_is_applied_to_the_tokenizer(self):
+        from src import rag
+
+        class Tok:
+            def enable_truncation(self, max_length):
+                self.max_length = max_length
+
+        class Inner:
+            tokenizer = Tok()
+
+        class Outer:
+            model = Inner()
+
+        rag._cap_tokens(Outer())
+        self.assertEqual(Inner.tokenizer.max_length, rag.EMBED_MAX_TOKENS)
