@@ -184,6 +184,8 @@ def _run_index_job(job: dict, paper_id: str, path: str, filename: str, make_acti
                 _set_job(job, stage="Opening the PDF")
                 paper = _index_saved(paper_id, path, filename, make_active,
                                      progress=lambda msg: _set_job(job, stage=msg))
+                print(f"[upload] indexed {filename}: {paper.pages} pages, {len(paper.chunks)} passages, "
+                      f"memory {_memory_mb()} MB")
             finally:
                 _index_lock.release()
                 release_memory()
@@ -485,7 +487,21 @@ def api_benchmarks():
 @app.route("/health")
 def health():
     """Liveness probe for the hosting platform (does not touch the LLM)."""
-    return jsonify({"status": "ok", "active_sessions": sessions.count(), "session_ttl_seconds": SESSION_TTL_SECONDS})
+    return jsonify({"status": "ok", "active_sessions": sessions.count(), "session_ttl_seconds": SESSION_TTL_SECONDS,
+                    "memory_mb": _memory_mb()})
+
+def _memory_mb() -> dict:
+    """Current and peak memory of this process, to check headroom on a small instance."""
+    out = {}
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith(("VmRSS", "VmHWM")):
+                    key = "now" if line.startswith("VmRSS") else "peak"
+                    out[key] = int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return out
 
 # =========================
 # PAPER LIBRARY (multi-paper)

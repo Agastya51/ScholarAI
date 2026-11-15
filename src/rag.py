@@ -36,7 +36,7 @@ if hasattr(fitz, "_layout_enabled"):
     fitz._layout_enabled = False
 os.environ.setdefault("PYMUPDF_SUGGEST_LAYOUT_ANALYZER", "0")
 
-from src.figures import MAX_FIGURES, attach_mentions, locate_figures
+from src.figures import MAX_FIGURES, attach_mentions, locate_figures, path_rects
 from src.config import (
     EMBEDDING_DIM, EMBEDDING_MODEL_NAME, FALLBACK_EMBEDDING_MODEL_NAME, QUERY_INSTRUCTION,
     DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, DEFAULT_TOP_K, RRF_K, CANDIDATE_POOL, USE_MMR, MMR_LAMBDA,
@@ -589,8 +589,8 @@ class RuleTable:
 def _horizontal_rules(drawings) -> List[tuple]:
     rules = []
     for d in drawings:
-        r = d.get("rect")
-        if r is not None and r.height <= 2.0 and r.width >= 40:
+        r = d.get("rect") if isinstance(d, dict) else d
+        if r is not None and r.height <= 2.5 and r.width >= 40:
             rules.append((r.x0, (r.y0 + r.y1) / 2, r.x1))
     return sorted(rules, key=lambda r: r[1])
 
@@ -650,6 +650,8 @@ def booktabs_tables(page, drawings, exclude: List[tuple] = ()) -> List[RuleTable
             out.append(RuleTable(box, rows_text))
     return out
 
+MAX_PATHS_FOR_TABLE_FINDER = 3000
+
 def find_ruled_tables(page, has_table_caption: bool = True) -> list:
     """Tables drawn with ruling lines (the common case in papers), without PyMuPDF's neural layout stage.
 
@@ -658,12 +660,14 @@ def find_ruled_tables(page, has_table_caption: bool = True) -> list:
     Pages with no vector drawings cannot hold a ruled table and are skipped without calling the finder.
     """
     try:
-        drawings = page.get_drawings()
+        drawings = path_rects(page)
     except Exception:
         return []
     if not drawings:
         return []
     tables: list = []
+    if len(drawings) > MAX_PATHS_FOR_TABLE_FINDER and not has_table_caption:
+        return []          # a dense plot: the grid finder would spend seconds and tens of MB for nothing
     try:
         try:
             found = page.find_tables(use_layout=False)

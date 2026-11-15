@@ -184,3 +184,45 @@ class TestLatexSamplePaper(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDensePlots(unittest.TestCase):
+    """Engineering papers have plots made of tens of thousands of vector paths; reading them must stay light."""
+
+    def _plot_page(self, paths=4000, caption="Fig. 1. BER versus SNR."):
+        doc = fitz.open()
+        page = doc.new_page(width=612, height=792)
+        shape = page.new_shape()
+        for i in range(paths):
+            x = 80 + (i % 400)
+            y = 200 + (i * 7) % 250
+            shape.draw_line((x, y), (x + 1, y + 1))
+            shape.finish(width=0.3)
+        shape.commit()
+        page.insert_text((80, 480), caption, fontsize=8)
+        return doc, page
+
+    def test_path_boxes_come_from_the_bbox_log(self):
+        from src.figures import path_rects
+        doc, page = self._plot_page(paths=300)
+        rects = path_rects(page)
+        self.assertGreaterEqual(len(rects), 300)
+        self.assertTrue(all(70 <= r.x0 <= 482 and 190 <= r.y0 and r.y1 <= 460 for r in rects))   # boxes include the stroke width
+        doc.close()
+
+    def test_table_finder_is_skipped_on_a_dense_plot_page(self):
+        from unittest.mock import patch
+        from src import rag
+        doc, page = self._plot_page()
+        with patch.object(type(page), "find_tables", side_effect=AssertionError("should not run")):
+            self.assertEqual(rag.find_ruled_tables(page, has_table_caption=False), [])
+        doc.close()
+
+    def test_dense_plot_is_still_found_as_one_figure(self):
+        from src.figures import page_graphics
+        doc, page = self._plot_page()
+        boxes = page_graphics(page)
+        self.assertEqual(len(boxes), 1)
+        self.assertLess(boxes[0][1], 210)
+        self.assertGreater(boxes[0][3], 440)
+        doc.close()

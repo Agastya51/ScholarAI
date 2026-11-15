@@ -56,13 +56,25 @@ def _overlap_share(inner: Box, outer: Box) -> float:
 # GRAPHICS ON A PAGE
 # =========================
 MAX_PATHS_FOR_EXACT_CLUSTERING = 2500
+_PATH_KINDS = ("fill-path", "stroke-path")
+
+def path_rects(page) -> List["fitz.Rect"]:
+    """Bounding boxes of the page's vector paths.
+
+    Read from the page's bbox log rather than get_drawings(): a plot exported from MATLAB or matplotlib can
+    hold tens of thousands of paths, and get_drawings() builds a dictionary of points for every one of them
+    (measured on such a page: 33 MB and 1 s, against 2 MB and 0.3 s for the bbox log)."""
+    try:
+        return [fitz.Rect(b) for kind, b in page.get_bboxlog() if kind in _PATH_KINDS]
+    except Exception:
+        return [d["rect"] for d in page.get_drawings()]
 
 def _coarse_clusters(drawings: Sequence[dict], tol: float = 5.0) -> List[Box]:
     """Merge the bounding boxes of vector paths that touch or nearly touch. Linear in the number of paths
     times the number of resulting clusters, so a scatter plot with 50,000 points stays fast."""
     boxes: List[Box] = []
     for d in drawings:
-        r = d.get("rect")
+        r = d.get("rect") if isinstance(d, dict) else d
         if r is None:
             continue
         b = (r.x0, r.y0, r.x1, r.y1)
@@ -103,10 +115,10 @@ def page_graphics(page, table_boxes: Sequence[Box] = ()) -> List[Box]:
     except Exception:
         pass
     try:
-        drawings = page.get_drawings()
+        rects = path_rects(page)
         # PyMuPDF's clustering is slow on plots made of thousands of paths; use the coarse merge there
-        clusters = _coarse_clusters(drawings) if len(drawings) > MAX_PATHS_FOR_EXACT_CLUSTERING \
-            else page.cluster_drawings(drawings=drawings)
+        clusters = _coarse_clusters(rects) if len(rects) > MAX_PATHS_FOR_EXACT_CLUSTERING \
+            else page.cluster_drawings(drawings=[{"rect": r} for r in rects])
         for r in clusters:
             b = tuple(fitz.Rect(r) & rect)
             if b[2] - b[0] < 40 or b[3] - b[1] < 30 or _area(b) >= 0.9 * page_area:
