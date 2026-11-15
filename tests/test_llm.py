@@ -86,3 +86,39 @@ class TestLLMLayer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestKeyAndConnectionErrors(unittest.TestCase):
+    def test_pasted_key_is_cleaned(self):
+        import importlib
+        import os
+        import src.config as config
+        saved = os.environ.get("GROQ_API_KEY")
+        try:
+            for raw in ["gsk_abc\n", " gsk_abc ", '"gsk_abc"', "'gsk_abc'\r\n"]:
+                os.environ["GROQ_API_KEY"] = raw
+                importlib.reload(config)
+                self.assertEqual(config.GROQ_API_KEY, "gsk_abc", repr(raw))
+        finally:
+            if saved is None:
+                os.environ.pop("GROQ_API_KEY", None)
+            else:
+                os.environ["GROQ_API_KEY"] = saved
+            importlib.reload(config)
+
+    def test_connection_error_names_the_cause(self):
+        from unittest.mock import MagicMock, patch
+        from src import llm as llm_module
+
+        class APIConnectionError(Exception):
+            pass
+
+        err = APIConnectionError("Connection error.")
+        err.__cause__ = ValueError("Illegal header value b'Bearer gsk_abc\\n'")
+        client = MagicMock()
+        client.chat.completions.create.side_effect = err
+        with patch.object(llm_module, "get_client", return_value=client):
+            with self.assertRaises(llm_module.LLMError) as ctx:
+                llm_module.groq_backend([{"role": "user", "content": "hi"}])
+        self.assertIn("Could not connect to Groq", str(ctx.exception))
+        self.assertIn("Illegal header value", str(ctx.exception))

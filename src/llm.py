@@ -95,6 +95,12 @@ def groq_backend(messages, tools=None, json_mode=False, max_tokens=LLM_MAX_TOKEN
                 print(f"[LLM fallback] {model} failed ({last_err[:80]}), trying next model...")
                 time.sleep(2)
                 continue
+            if type(e).__name__ == "APIConnectionError":
+                cause = e.__cause__ or e.__context__
+                detail = f" ({type(cause).__name__}: {str(cause)[:120]})" if cause else ""
+                print(f"[LLM] could not reach Groq{detail}")
+                raise LLMError(f"Could not connect to Groq{detail}. Check the server's internet access and that "
+                               "GROQ_API_KEY has no spaces or line breaks.") from e
             raise LLMError(f"{model}: {e}") from e
 
         msg = res.choices[0].message

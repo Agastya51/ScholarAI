@@ -76,7 +76,10 @@ function friendlyError(message) {
   const m = String(message);
   if (/rate.?limit|429/i.test(m)) return "The language model is busy (rate limit). Wait about a minute and try again.";
   if (/budget/i.test(m)) return "This request needed more model calls than allowed. Try a narrower request.";
-  if (/GROQ_API_KEY|api key|401/i.test(m)) return "The server has no working Groq API key. Add GROQ_API_KEY to the .env file and restart.";
+  if (/Could not connect to Groq|Connection error/i.test(m))
+    return "The server could not reach the language model (Groq). Try again in a moment. If it keeps happening, check GROQ_API_KEY in the server settings for spaces or line breaks.";
+  if (/GROQ_API_KEY|api key|401/i.test(m))
+    return "The server has no working Groq API key. Set GROQ_API_KEY (in .env locally, or under Environment on Render) and restart.";
   return m.replace(/^LLM error:\s*/i, "");
 }
 

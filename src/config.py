@@ -5,7 +5,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # API Keys
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# Keys pasted into a hosting dashboard often carry a trailing space, newline or quotes; any of them makes every
+# request fail with a bare "Connection error", so they are removed here.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip().strip("\"'").strip()
 
 def _flag(name: str, default: bool) -> bool:
     return os.environ.get(name, str(default)).lower() in ("true", "1", "t", "yes", "on")
