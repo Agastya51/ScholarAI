@@ -30,8 +30,8 @@ from typing import List
 from evals.common import load_dataset, load_eval_paper, safe_stdout, save_report
 from evals.metrics import average, facts_of, is_answerable, markdown_table, norm
 from evals.retrieval_eval import COLUMNS, NO_LLM_CONFIGS, evaluate_retrieval
-from src.config import DEFAULT_TOP_K, EMBEDDING_MODEL_NAME
-from src.rag import Paper
+from src.config import DEFAULT_TOP_K
+from src.rag import Paper, embedding_label
 from src.retrieval import cross_encoder_scores, retrieve_context
 
 SUITE_PATH = os.path.join("evals", "benchmark", "suite.json")
@@ -150,7 +150,7 @@ def run(suite: List[dict], k: int, offline: bool, answers: bool, judge: bool, sl
                               "context_recall_ci": bootstrap_ci([r["context_recall"] for r in rows])}
     result = {
         "generated": time.strftime("%Y-%m-%d %H:%M"), "offline": offline, "k": k,
-        "embedding_model": "toy hashing embedder (offline smoke test)" if offline else EMBEDDING_MODEL_NAME,
+        "embedding_model": "toy hashing embedder (offline smoke test)" if offline else embedding_label(),
         "machine": f"{platform.system()} {platform.machine()}, Python {platform.python_version()}",
         "papers": papers_out, "skipped": skipped, "pooled_retrieval": pooled,
     }

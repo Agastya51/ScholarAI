@@ -292,3 +292,57 @@ class TestLowMemoryEmbedding(unittest.TestCase):
 
         rag._cap_tokens(Outer())
         self.assertEqual(Inner.tokenizer.max_length, rag.EMBED_MAX_TOKENS)
+
+
+class TestStaticEmbeddingBackend(unittest.TestCase):
+    """The default backend is a static (Model2Vec) model: no ONNX Runtime, so it fits a 512 MB server."""
+
+    def test_static_backend_is_default_and_used_end_to_end(self):
+        from unittest.mock import patch
+        import numpy as np
+        from src import rag
+        from src.config import EMBEDDING_BACKEND
+
+        self.assertEqual(EMBEDDING_BACKEND, "static")
+
+        class FakeStatic:
+            def __init__(self):
+                self.calls = []
+
+            def encode(self, batch, max_length=None, use_multiprocessing=True):
+                self.calls.append((len(batch), max_length, use_multiprocessing))
+                return np.ones((len(batch), 512), dtype=np.float16)
+
+        fake = FakeStatic()
+        saved = (rag._embed_model, rag._is_static, rag._is_fastembed)
+        try:
+            rag._embed_model = None
+            with patch.object(rag, "_load_static", return_value=fake), \
+                    patch.object(rag, "_load_fastembed", side_effect=AssertionError("must not load ONNX")):
+                rag.get_embedder()
+                out = rag.encode(["a passage"] * 70)
+                store = rag.VectorStore()
+                store.add_chunks(["alpha beta", "gamma delta"])
+                q = rag.encode_query(["what is alpha"])
+            self.assertEqual(out.shape, (70, 512))
+            self.assertEqual(out.dtype, np.float32)
+            self.assertEqual(store.dimension, 512)                 # index width follows the model
+            self.assertEqual(q.shape, (1, 512))
+            self.assertTrue(all(not mp for _, _, mp in fake.calls))  # no worker processes
+            self.assertIn("static", rag.embedding_model_id())
+        finally:
+            rag._embed_model, rag._is_static, rag._is_fastembed = saved
+
+    def test_falls_back_to_fastembed_when_the_static_model_cannot_load(self):
+        from unittest.mock import patch
+        from src import rag
+        saved = (rag._embed_model, rag._is_static, rag._is_fastembed)
+        try:
+            rag._embed_model = None
+            with patch.object(rag, "_load_static", side_effect=RuntimeError("offline")), \
+                    patch.object(rag, "_load_fastembed", return_value="onnx-model"):
+                self.assertEqual(rag.get_embedder(), "onnx-model")
+            self.assertTrue(rag._is_fastembed)
+            self.assertFalse(rag._is_static)
+        finally:
+            rag._embed_model, rag._is_static, rag._is_fastembed = saved

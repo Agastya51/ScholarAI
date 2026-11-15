@@ -26,6 +26,12 @@ VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 LLM_MAX_TOKENS = 2048
 
 # Vector Search / Embeddings
+# "static" (default): Model2Vec static embeddings. No neural network runs at inference (a token-vector lookup and
+#   a weighted mean), so the server needs ~70 MB for the model and nothing extra while indexing. This is what
+#   fits Render's free 512 MB instance: with the transformer below loaded, the idle server already sat at ~306 MB.
+# "fastembed": BAAI/bge-small-en-v1.5 through ONNX Runtime. Better retrieval, but needs about 1 GB of RAM.
+EMBEDDING_BACKEND = os.environ.get("EMBEDDING_BACKEND", "static").strip().lower()
+STATIC_EMBEDDING_MODEL = os.environ.get("STATIC_EMBEDDING_MODEL", "minishlab/potion-retrieval-32M")
 EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"      # FastEmbed (ONNX), 384-dim
 FALLBACK_EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"   # only if fastembed is unavailable
 EMBEDDING_DIM = 384
@@ -43,8 +49,10 @@ USE_MMR = _flag("USE_MMR", True)     # Maximal Marginal Relevance: trade relevan
 MMR_LAMBDA = float(os.environ.get("MMR_LAMBDA", 0.7))   # 1.0 = pure relevance, 0.0 = pure diversity
 # Cosine-similarity thresholds (query vs chunk). Calibrate for your papers with evals.retrieval_eval,
 # which prints the score distribution of relevant vs irrelevant chunks.
-MIN_RELEVANCE = float(os.environ.get("MIN_RELEVANCE", 0.40))     # below this (and no keyword hit) a chunk is dropped
-HIGH_CONFIDENCE = float(os.environ.get("HIGH_CONFIDENCE", 0.60))  # top chunk above this => "high" confidence
+# Cosine scales differ by model: static embeddings give lower similarities than bge
+_STATIC = EMBEDDING_BACKEND == "static"
+MIN_RELEVANCE = float(os.environ.get("MIN_RELEVANCE", 0.25 if _STATIC else 0.40))     # below this (and no keyword hit) a chunk is dropped
+HIGH_CONFIDENCE = float(os.environ.get("HIGH_CONFIDENCE", 0.50 if _STATIC else 0.60))  # top chunk above this => "high" confidence
 # Query expansion (multi-query rewrite + HyDE). "auto" = only when the first pass has low confidence
 # (costs one extra LLM call), "always", or "off".
 QUERY_EXPANSION = os.environ.get("QUERY_EXPANSION", "auto").lower()

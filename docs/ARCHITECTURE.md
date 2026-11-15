@@ -52,7 +52,7 @@ Finally the reference list is split into numbered entries, and the sentences tha
 
 **Chunking.** `chunk_segments()` packs whole sentences into chunks of about 900 characters with about 150 characters of overlap, never across a section boundary, so each chunk keeps one page/section anchor. Tables become their own chunks (caption + markdown), figure captions become `caption` chunks, and reference-list chunks are tagged `reference`. Each chunk is indexed as `<section>: <text>` so it can be found by the section it belongs to.
 
-**Indexing.** Chunks are embedded with `BAAI/bge-small-en-v1.5` (384 dimensions; queries get the model's retrieval instruction prefix) and stored in a FAISS inner-product index over normalised vectors, so scores are cosine similarities comparable across questions. A BM25 index is built over the same texts. Embeddings are cached on disk under a hash of the model name and chunk texts, so re-uploading the same paper skips embedding.
+**Indexing.** Chunks are embedded with the static Model2Vec model `minishlab/potion-retrieval-32M` by default (512 dimensions, float16; a token-vector lookup and weighted mean, so no neural network runs and memory stays within a 512 MB instance), or with `BAAI/bge-small-en-v1.5` through ONNX Runtime when `EMBEDDING_BACKEND=fastembed` (384 dimensions; queries get the model's retrieval instruction prefix). Vectors are stored in a FAISS inner-product index over normalised vectors, so scores are cosine similarities comparable across questions. A BM25 index is built over the same texts. Embeddings are cached on disk under a hash of the model name and chunk texts, so re-uploading the same paper skips embedding.
 
 ---
 

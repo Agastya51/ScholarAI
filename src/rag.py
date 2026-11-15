@@ -39,6 +39,7 @@ os.environ.setdefault("PYMUPDF_SUGGEST_LAYOUT_ANALYZER", "0")
 from src.figures import MAX_FIGURES, attach_mentions, locate_figures, path_rects
 from src.config import (
     EMBEDDING_DIM, EMBEDDING_MODEL_NAME, FALLBACK_EMBEDDING_MODEL_NAME, QUERY_INSTRUCTION,
+    EMBEDDING_BACKEND, STATIC_EMBEDDING_MODEL,
     DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, DEFAULT_TOP_K, RRF_K, CANDIDATE_POOL, USE_MMR, MMR_LAMBDA,
     UPLOAD_DIR, FIGURE_DIR, EMBED_CACHE_DIR, EMBED_CACHE_MAX_FILES, MAX_PDF_PAGES,
     MAX_SESSIONS, SESSION_TTL_SECONDS, MAX_PAPERS_PER_SESSION,
@@ -49,6 +50,7 @@ from src.config import (
 # =========================
 _embed_model = None
 _is_fastembed = False
+_is_static = False
 
 # Memory on a 512 MB instance. The transformer's working memory grows with batch x tokens^2, and ONNX Runtime's
 # arena keeps the largest block it ever allocated. Measured with a model of this size: 16 passages of 512 tokens
@@ -68,28 +70,52 @@ def _cap_tokens(model):
             except Exception:
                 pass
 
+def _load_static():
+    from model2vec import StaticModel
+    try:
+        return StaticModel.from_pretrained(STATIC_EMBEDDING_MODEL, force_download=False, quantize_to="float16")
+    except TypeError:                                   # older model2vec
+        return StaticModel.from_pretrained(STATIC_EMBEDDING_MODEL)
+
+def _load_fastembed():
+    from fastembed import TextEmbedding
+    # BAAI/bge-small-en-v1.5: 384-dimensional quantised ONNX model; one thread, no memory arena
+    try:
+        model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, threads=1, enable_cpu_mem_arena=False)
+    except TypeError:
+        model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, threads=1)
+    _cap_tokens(model)
+    return model
+
 def get_embedder():
-    """Load the embedding model once for the whole process, set up for low memory."""
-    global _embed_model, _is_fastembed
+    """Load the embedding model once for the whole process (see EMBEDDING_BACKEND in config.py)."""
+    global _embed_model, _is_fastembed, _is_static
     if _embed_model is None:
+        errors = []
+        order = ["static", "fastembed"] if EMBEDDING_BACKEND == "static" else ["fastembed", "static"]
+        for backend in order:
+            try:
+                if backend == "static":
+                    _embed_model, _is_static, _is_fastembed = _load_static(), True, False
+                else:
+                    _embed_model, _is_static, _is_fastembed = _load_fastembed(), False, True
+                print(f"[embeddings] using {embedding_label()}")
+                return _embed_model
+            except Exception as e:
+                errors.append(f"{backend}: {str(e)[:150]}")
         try:
-            from fastembed import TextEmbedding
-            # BAAI/bge-small-en-v1.5: 384-dimensional quantised ONNX model; one thread, no memory arena
-            try:
-                model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, threads=1, enable_cpu_mem_arena=False)
-            except TypeError:
-                model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME, threads=1)
-            _cap_tokens(model)
-            _embed_model, _is_fastembed = model, True
-        except Exception as e:
-            try:
-                from sentence_transformers import SentenceTransformer
-                _embed_model = SentenceTransformer(FALLBACK_EMBEDDING_MODEL_NAME)
-                _embed_model.max_seq_length = EMBED_MAX_TOKENS
-                _is_fastembed = False
-            except Exception:
-                raise RuntimeError(f"Could not load embedding model: {e}")
+            from sentence_transformers import SentenceTransformer
+            _embed_model = SentenceTransformer(FALLBACK_EMBEDDING_MODEL_NAME)
+            _embed_model.max_seq_length = EMBED_MAX_TOKENS
+            _is_fastembed = _is_static = False
+        except Exception:
+            raise RuntimeError("Could not load embedding model: " + " | ".join(errors))
     return _embed_model
+
+def embedding_label() -> str:
+    if _is_static:
+        return STATIC_EMBEDDING_MODEL + " (static)"
+    return EMBEDDING_MODEL_NAME if _is_fastembed else FALLBACK_EMBEDDING_MODEL_NAME
 
 def release_memory():
     """Give freed memory back to the operating system after a big job (parsing, indexing)."""
@@ -108,8 +134,7 @@ def release_memory():
 def embedding_model_id() -> str:
     """Identifier baked into cache keys so a model change never reuses stale vectors."""
     get_embedder()
-    name = EMBEDDING_MODEL_NAME if _is_fastembed else FALLBACK_EMBEDDING_MODEL_NAME
-    return f"{name}|max{EMBED_MAX_TOKENS}"      # the token cap changes the vectors, so it is part of the cache key
+    return f"{embedding_label()}|max{EMBED_MAX_TOKENS}"      # the token cap changes the vectors, so it is part of the cache key
 
 ProgressFn = Callable[[str], None]
 
@@ -117,6 +142,8 @@ def _noop(_message: str):
     pass
 
 def _embed_batch(model, batch: List[str]) -> list:
+    if _is_static:
+        return list(model.encode(batch, max_length=EMBED_MAX_TOKENS, use_multiprocessing=False))
     if _is_fastembed:
         return list(model.embed(batch, batch_size=len(batch)))
     return list(model.encode(batch, batch_size=len(batch)))
@@ -131,17 +158,18 @@ def encode(texts: List[str], progress: Optional[ProgressFn] = None) -> np.ndarra
     clipped = [t[:EMBED_MAX_CHARS] for t in texts]
     order = sorted(range(len(clipped)), key=lambda i: len(clipped[i]))
     vectors: List[Optional[np.ndarray]] = [None] * len(clipped)
-    for start in range(0, len(order), EMBED_BATCH):
-        idx = order[start:start + EMBED_BATCH]
+    step = 64 if _is_static else EMBED_BATCH          # a static model has no activations to bound
+    for start in range(0, len(order), step):
+        idx = order[start:start + step]
         for i, vec in zip(idx, _embed_batch(model, [clipped[i] for i in idx])):
             vectors[i] = np.asarray(vec, dtype=np.float32)
-        progress(f"Building the search index: {min(start + EMBED_BATCH, len(order))} of {len(order)} passages")
+        progress(f"Building the search index: {min(start + step, len(order))} of {len(order)} passages")
     return np.stack(vectors).astype(np.float32)
 
 def encode_query(texts: List[str]) -> np.ndarray:
     """Embed queries. bge models expect a retrieval instruction on the query side only."""
     get_embedder()
-    if _is_fastembed and QUERY_INSTRUCTION:
+    if _is_fastembed and QUERY_INSTRUCTION:           # bge's query instruction; static models take the query as is
         texts = [QUERY_INSTRUCTION + t for t in texts]
     return encode(texts)
 
@@ -298,6 +326,10 @@ class VectorStore:
         metas = [c if isinstance(c, dict) else {"text": c, "page": None, "section": None, "kind": "text"} for c in chunks]
         index_texts = [str(m.get("embed_text") or m["text"]) for m in metas]
         vectors = _normalize(embeddings) if embeddings is not None else self.encode(index_texts)
+        if self.index.ntotal == 0 and vectors.shape[1] != self.dimension:     # the model decides the width
+            self.dimension = int(vectors.shape[1])
+            self.index = faiss.IndexFlatIP(self.dimension)
+            self.vectors = np.zeros((0, self.dimension), dtype=np.float32)
         self.index.add(vectors)
         self.vectors = np.vstack([self.vectors, vectors])
         self.bm25.add(index_texts)
