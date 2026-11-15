@@ -19,7 +19,7 @@
     <button class="btn btn-primary" id="uploadBtn" disabled>Read this paper</button>
     <span id="uploadStatus"></span>
   </div>
-  <p class="hint hidden" id="uploadWait" style="margin-top:10px">Reading the layout, tables and figures, and building the search index. This takes a few seconds to a minute.</p>
+  <p class="hint hidden" id="uploadWait" style="margin-top:10px"></p>
 
   <div class="promise">
     <div><h3>Answers you can check</h3><p>Click any page reference to open that page of the PDF with the exact passage highlighted.</p></div>
@@ -143,22 +143,14 @@
   async function uploadPaper() {
     if (!selectedFile) return;
     setBtn("uploadBtn", true, "Reading the paper…");
-    $("uploadWait").classList.remove("hidden");
+    const wait = $("uploadWait");
+    wait.textContent = "Uploading…";
+    wait.classList.remove("hidden");
     say("uploadStatus", "", "");
-    const form = new FormData();
-    form.append("file", selectedFile);
     try {
-      let res;
-      try { res = await fetch("/upload", { method: "POST", body: form }); }
-      catch { throw new Error("Could not reach the server. Check that it is running and try again."); }
-      let data;
-      try { data = await res.json(); } catch {
-        throw new Error(res.status === 502 || res.status === 504
-          ? "The server took too long and gave up. Try again, or use a shorter paper."
-          : `The server sent an unreadable reply (${res.status}).`);
-      }
-      if (!res.ok || data.error) throw new Error(friendlyError(data.error || `Server error (${res.status})`));
-
+      const data = await uploadAndWait("/upload", selectedFile, (stage, seconds) => {
+        wait.textContent = stage + (seconds > 20 ? ` (${seconds} s so far; the free server is slow, this can take a few minutes)` : "");
+      });
       forgetPaper();                       // results that belonged to the previous paper
       SS.set("paper_id", data.paper_id);
       SS.set("title", data.title);
@@ -172,7 +164,7 @@
       say("uploadStatus", "bad", e.message);
     }
     setBtn("uploadBtn", false, "Read this paper");
-    $("uploadWait").classList.add("hidden");
+    wait.classList.add("hidden");
   }
 
   drop.addEventListener("click", () => input.click());

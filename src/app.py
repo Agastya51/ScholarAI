@@ -2,6 +2,8 @@ import json
 import os
 import re
 import shutil
+import threading
+import time
 import uuid
 from functools import wraps
 
@@ -124,9 +126,12 @@ def _save_upload() -> tuple:
     return paper_id, path, file.filename
 
 def _index_upload(make_active: bool):
-    """Save, parse and index an uploaded PDF; never leave the file behind if indexing fails."""
+    """Save, parse and index an uploaded PDF in this request (used by tests and scripts)."""
     paper_id, path, filename = _save_upload()
+    return _index_saved(paper_id, path, filename, make_active)
 
+def _index_saved(paper_id: str, path: str, filename: str, make_active: bool, progress=None):
+    """Parse and index a saved PDF into the current session's library; never leave the file behind on failure."""
     def discard():
         try:
             if os.path.exists(path):
@@ -136,7 +141,7 @@ def _index_upload(make_active: bool):
         shutil.rmtree(os.path.join(FIGURE_DIR, paper_id), ignore_errors=True)
 
     try:
-        paper = load_paper(path, filename, paper_id)
+        paper = load_paper(path, filename, paper_id, progress=progress)
     except Exception:
         discard()
         raise
@@ -144,6 +149,73 @@ def _index_upload(make_active: bool):
         discard()
         raise ValueError("No text could be extracted from this PDF (it may be a scanned image).")
     return library.add(paper, make_active=make_active)
+
+# =========================
+# BACKGROUND JOBS
+# Reading and indexing a paper can take minutes on a small CPU. The upload request only saves the file and
+# starts a job; the browser polls the job, so no request ever runs into a proxy or worker timeout.
+# =========================
+JOB_TTL_SECONDS = 1800
+_jobs: dict = {}
+_jobs_lock = threading.Lock()
+_index_lock = threading.Lock()          # one paper is parsed at a time: bounded memory on a small instance
+
+def _new_job(session_id: str) -> dict:
+    now = time.time()
+    with _jobs_lock:
+        for jid in [j for j, job in _jobs.items() if now - job["updated"] > JOB_TTL_SECONDS]:
+            _jobs.pop(jid, None)
+        job = {"id": uuid.uuid4().hex, "session": session_id, "status": "running", "stage": "Waiting to start",
+               "result": None, "error": None, "started": now, "updated": now}
+        _jobs[job["id"]] = job
+    return job
+
+def _set_job(job: dict, **fields):
+    with _jobs_lock:
+        job.update(fields, updated=time.time())
+
+def _run_index_job(job: dict, paper_id: str, path: str, filename: str, make_active: bool, build_result):
+    with use_session(job["session"]):
+        try:
+            if not _index_lock.acquire(blocking=False):
+                _set_job(job, stage="Waiting for another paper to finish")
+                _index_lock.acquire()
+            try:
+                _set_job(job, stage="Opening the PDF")
+                paper = _index_saved(paper_id, path, filename, make_active,
+                                     progress=lambda msg: _set_job(job, stage=msg))
+            finally:
+                _index_lock.release()
+            _set_job(job, status="done", stage="Done", result=build_result(paper))
+        except ValueError as e:
+            _set_job(job, status="error", error=str(e))
+        except Exception as e:
+            print(f"[upload] indexing failed: {type(e).__name__}: {e}")
+            _set_job(job, status="error", error=f"Could not read this PDF ({type(e).__name__}: {str(e)[:200]})")
+
+def _start_index_job(make_active: bool, build_result):
+    paper_id, path, filename = _save_upload()
+    job = _new_job(current_session_id())
+    worker = threading.Thread(target=_run_index_job, name=f"index-{paper_id}", daemon=True,
+                              args=(job, paper_id, path, filename, make_active, build_result))
+    worker.start()
+    if app.config.get("INLINE_JOBS"):     # tests: finish before answering
+        worker.join()
+    return jsonify({"job_id": job["id"], "status": job["status"], "stage": job["stage"]}), 202
+
+@app.route("/api/jobs/<job_id>")
+def job_status(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None or job["session"] != current_session_id():
+            return jsonify({"error": "This upload is no longer known to the server. The server may have restarted "
+                                     "(on the free plan this usually means it ran out of memory). Please upload again.",
+                            "status": "lost"}), 404
+        out = {k: job[k] for k in ("status", "stage", "error")}
+        out["seconds"] = round(time.time() - job["started"])
+        if job["status"] == "done":
+            out["result"] = job["result"]
+    return jsonify(out)
 
 # =========================
 # WEB PAGE ROUTES
@@ -200,14 +272,19 @@ def _paper_stats(paper) -> dict:
             "figures": len(paper.figures), "tables": len(paper.tables), "captions": len(paper.captions),
             "references": len(paper.references), "embedding_cache_hit": paper.cache_hit}
 
-@app.route("/upload", methods=["POST"])
-@agent_endpoint
-def upload():
-    """Step 1 of opening a paper: parse and index it (no language-model calls, so it is quick and cannot hit
-    a rate limit). The browser then calls /api/prepare for the summary; figures are explained on demand."""
-    paper = _index_upload(make_active=True)
+def _upload_result(paper) -> dict:
     return {"paper_id": paper.id, "title": paper.title, "stats": _paper_stats(paper),
-            "figures": _figures_payload(paper), "trace": []}
+            "figures": _figures_payload(paper), "trace": [], "llm_calls": 0}
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    """Step 1 of opening a paper: save it and start parsing + indexing in the background (no language-model
+    calls). Answers 202 with a job id; poll /api/jobs/<id>. Then /api/prepare writes the summary, and figures
+    are explained on demand."""
+    try:
+        return _start_index_job(True, _upload_result)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route("/api/prepare", methods=["POST"])
 @agent_endpoint
@@ -417,11 +494,12 @@ def list_papers():
     return jsonify({"papers": library.list(), "active_id": library.active_id})
 
 @app.route("/papers", methods=["POST"])
-@agent_endpoint
 def add_paper():
-    """Index an additional paper into the library without running the upload analysis."""
-    paper = _index_upload(make_active=False)
-    return {"paper": paper.info(), "papers": library.list()}
+    """Index an additional paper into the library in the background (poll /api/jobs/<id>)."""
+    try:
+        return _start_index_job(False, lambda paper: {"paper": paper.info(), "papers": library.list()})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route("/papers/<paper_id>", methods=["DELETE"])
 def delete_paper(paper_id):

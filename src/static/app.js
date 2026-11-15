@@ -83,6 +83,40 @@ function friendlyError(message) {
   return m.replace(/^LLM error:\s*/i, "");
 }
 
+// ---------- Upload a PDF and follow the background job until the paper is indexed ----------
+async function uploadAndWait(url, file, onStage) {
+  const form = new FormData();
+  form.append("file", file);
+  let res;
+  try { res = await fetch(url, { method: "POST", body: form }); }
+  catch { throw new Error("Could not reach the server. Check your connection and try again."); }
+  let data = {};
+  try { data = await res.json(); } catch {
+    throw new Error(res.status === 413 ? "This file is too large." : `The server could not accept the file (${res.status}). Try again in a moment.`);
+  }
+  if (!res.ok && res.status !== 202) throw new Error(friendlyError(data.error || `Server error (${res.status})`));
+  if (!data.job_id) return data;                      // answered directly
+  let misses = 0;
+  while (true) {
+    await new Promise(r => setTimeout(r, 1500));
+    let job;
+    try {
+      const r = await fetch(`/api/jobs/${encodeURIComponent(data.job_id)}`);
+      job = await r.json();
+      if (r.status === 404) throw Object.assign(new Error(job.error), { final: true });
+    } catch (e) {
+      if (e.final) throw e;
+      if (++misses > 40) throw new Error("Lost contact with the server while it was reading the paper. Try again.");
+      onStage && onStage("Waiting for the server…", null);
+      continue;
+    }
+    misses = 0;
+    if (job.status === "done") return job.result;
+    if (job.status === "error") throw new Error(friendlyError(job.error));
+    onStage && onStage(job.stage, job.seconds);
+  }
+}
+
 // ---------- Agent trace, sources, evidence ----------
 function traceItemsHtml(trace) {
   return (trace || []).map(e => `

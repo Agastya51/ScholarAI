@@ -91,7 +91,7 @@ question
 
 | Feature | Route | Module | Pattern |
 | --- | --- | --- | --- |
-| Open a paper | `POST /upload`, then `POST /api/prepare` | `app.py`, `workflows.py` | Upload parses and indexes only (no model calls). Prepare runs a graph: summarise (targeted retrieval over abstract, method, results, conclusions) → extract search keywords. Figures are explained on demand |
+| Open a paper | `POST /upload` → poll `GET /api/jobs/<id>`, then `POST /api/prepare` | `app.py`, `workflows.py` | Upload saves the file and starts a background job that parses and indexes it (no model calls; one paper at a time; progress reported page by page). Prepare runs a graph: summarise (targeted retrieval over abstract, method, results, conclusions) → extract search keywords. Figures are explained on demand |
 | Quick answer | `POST /ask` (`mode=simple`) | `workflows.py` | Retrieval pipeline + one grounded answer call, with confidence and grounding report |
 | Thorough answer | `POST /ask` (`mode=agent`) | `agents/qa_agent.py` | ReAct tool loop over `search_paper`, `get_section`, `get_table`, `analyze_figure`, `get_reference`, external literature tools; capped iterations; conversation memory |
 | Related work | `POST /compare` | `workflows.py` | Search four databases → LLM relevance grader → reformulate keywords if too few are relevant (max 3 attempts) → comparative study |

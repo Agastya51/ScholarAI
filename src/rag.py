@@ -73,13 +73,25 @@ def embedding_model_id() -> str:
     get_embedder()
     return EMBEDDING_MODEL_NAME if _is_fastembed else FALLBACK_EMBEDDING_MODEL_NAME
 
-def encode(texts: List[str]) -> np.ndarray:
-    """Embed passages."""
+ProgressFn = Callable[[str], None]
+EMBED_BATCH = 8   # small batches keep peak memory flat on a 512 MB instance
+
+def _noop(_message: str):
+    pass
+
+def encode(texts: List[str], progress: Optional[ProgressFn] = None) -> np.ndarray:
+    """Embed passages, reporting progress every batch."""
     model = get_embedder()
-    if _is_fastembed:
-        # Small batches keep peak RAM flat on a 512 MB instance
-        return np.array(list(model.embed(texts, batch_size=16)), dtype=np.float32)
-    return np.array(model.encode(texts), dtype=np.float32)
+    progress = progress or _noop
+    out = []
+    for start in range(0, len(texts), EMBED_BATCH):
+        batch = texts[start:start + EMBED_BATCH]
+        if _is_fastembed:
+            out.extend(model.embed(batch, batch_size=EMBED_BATCH))
+        else:
+            out.extend(model.encode(batch))
+        progress(f"Building the search index: {min(start + EMBED_BATCH, len(texts))} of {len(texts)} passages")
+    return np.array(out, dtype=np.float32).reshape(len(texts), -1) if out else np.zeros((0, EMBEDDING_DIM), np.float32)
 
 def encode_query(texts: List[str]) -> np.ndarray:
     """Embed queries. bge models expect a retrieval instruction on the query side only."""
@@ -672,7 +684,8 @@ def parse_references(text: str) -> List[dict]:
             refs.append({"n": n, "text": body[:600]})
     return refs
 
-def parse_document(file_path: str, figure_dir: str = FIGURE_DIR, max_images: int = MAX_FIGURES) -> dict:
+def parse_document(file_path: str, figure_dir: str = FIGURE_DIR, max_images: int = MAX_FIGURES,
+                   progress: Optional[ProgressFn] = None) -> dict:
     """Extract text segments (page + section), figures, tables, captions and references from a PDF.
 
     Returns dict with keys: title, text, pages, segments [{page, section, text}],
@@ -686,15 +699,16 @@ def parse_document(file_path: str, figure_dir: str = FIGURE_DIR, max_images: int
             raise ValueError(f"This PDF has {doc.page_count} pages; the limit is {MAX_PDF_PAGES}. "
                              "Upload a shorter paper.")
         os.makedirs(figure_dir, exist_ok=True)
-        return _parse_pages(doc, figure_dir, max_images)
+        return _parse_pages(doc, figure_dir, max_images, progress or _noop)
     finally:
         doc.close()
 
-def _parse_pages(doc, figure_dir: str, max_images: int) -> dict:
+def _parse_pages(doc, figure_dir: str, max_images: int, progress: ProgressFn = _noop) -> dict:
     # ---- Pass A: layout of every page (blocks in reading order, tables, captions) ----
     layout: Dict[int, dict] = {}
     captions: List[dict] = []
     for page_no, page in enumerate(doc, start=1):
+        progress(f"Reading the layout of page {page_no} of {doc.page_count}")
         info: dict = {}
         blocks = ordered_blocks(page, info)
         has_table_caption = any((detect_caption(b["text"]) or {}).get("kind") == "table" for b in blocks)
@@ -714,6 +728,7 @@ def _parse_pages(doc, figure_dir: str, max_images: int) -> dict:
                            "captions": block_captions, "two_column": bool(info.get("two_column"))}
 
     # ---- Figures: join each picture with its caption, even across a page break (src/figures.py) ----
+    progress("Finding figures and their captions")
     figures = locate_figures(doc, captions,
                              {n: l["blocks"] for n, l in layout.items()},
                              {n: [tb for tb in l["table_boxes"] if tb != (0, 0, 0, 0)] for n, l in layout.items()},
@@ -729,6 +744,7 @@ def _parse_pages(doc, figure_dir: str, max_images: int) -> dict:
     top_section = ""
     title = ""
     for page_no, page in enumerate(doc, start=1):
+        progress(f"Reading the text of page {page_no} of {doc.page_count}")
         lay = layout[page_no]
         table_boxes = lay["table_boxes"]
         page_text_parts: List[str] = []
@@ -1100,13 +1116,14 @@ library = _LibraryProxy()
 # =========================
 def load_paper(file_path: str, filename: str = "", paper_id: Optional[str] = None,
                encoder: Optional[Callable[[List[str]], np.ndarray]] = None,
-               cache_dir: Optional[str] = EMBED_CACHE_DIR) -> Paper:
+               cache_dir: Optional[str] = EMBED_CACHE_DIR, progress: Optional[ProgressFn] = None) -> Paper:
     """Parse, chunk, and index a PDF into a Paper (not yet registered in the library).
 
     Embeddings are cached on disk by content hash, so re-uploading the same PDF skips the embedding step.
     """
     paper_id = paper_id or uuid.uuid4().hex[:10]
-    parsed = parse_document(file_path, figure_dir=os.path.join(FIGURE_DIR, paper_id))
+    progress = progress or _noop
+    parsed = parse_document(file_path, figure_dir=os.path.join(FIGURE_DIR, paper_id), progress=progress)
     chunks = build_chunks(parsed)
     store = VectorStore(encoder=encoder)
     index_texts = [str(c.get("embed_text") or c["text"]) for c in chunks]
@@ -1115,9 +1132,12 @@ def load_paper(file_path: str, filename: str = "", paper_id: Optional[str] = Non
         if encoder is None and cache_dir:
             model_id = embedding_model_id()
             cache_hit = os.path.exists(os.path.join(cache_dir, embedding_cache_key(index_texts, model_id) + ".npy"))
-            vectors = embed_with_cache(index_texts, encode, model_id, cache_dir)
+            if cache_hit:
+                progress("Reusing the search index from an earlier upload of this paper")
+            vectors = embed_with_cache(index_texts, lambda texts: encode(texts, progress), model_id, cache_dir)
         else:
-            vectors = (encoder or encode)(index_texts)
+            progress(f"Building the search index: {len(index_texts)} passages")
+            vectors = encoder(index_texts) if encoder is not None else encode(index_texts, progress)
         store.add_chunks(chunks, embeddings=vectors)
     return Paper(id=paper_id, filename=filename or os.path.basename(file_path), path=file_path,
                  title=parsed["title"], text=parsed["text"], segments=parsed["segments"],

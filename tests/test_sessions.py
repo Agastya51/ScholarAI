@@ -1,6 +1,13 @@
 """Per-browser session isolation, eviction, file cleanup and upload safety."""
 import io
+
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz
 import os
+import time
+from types import SimpleNamespace
 import shutil
 import tempfile
 import unittest
@@ -15,8 +22,8 @@ from src.rag import (
 from tests.fakes import FakeLLM, hash_encoder, make_paper
 from tests.pdf_factory import build_two_column_pdf
 
-def _offline_load_paper(path, filename="", paper_id=None):
-    return load_paper(path, filename, paper_id, encoder=hash_encoder)
+def _offline_load_paper(path, filename="", paper_id=None, progress=None):
+    return load_paper(path, filename, paper_id, encoder=hash_encoder, progress=progress)
 
 class TestSessionManager(unittest.TestCase):
     def test_each_session_has_its_own_library(self):
@@ -147,6 +154,7 @@ class TestFileCleanup(unittest.TestCase):
 class TestAppSessions(unittest.TestCase):
     def setUp(self):
         app.config["SESSION_ISOLATION"] = True
+        app.config["INLINE_JOBS"] = False      # real background threads, polled like the browser does
         self.tmp = tempfile.mkdtemp()
         self.pdf = build_two_column_pdf(os.path.join(self.tmp, "paper.pdf"))
 
@@ -159,10 +167,23 @@ class TestAppSessions(unittest.TestCase):
             sessions.drop(sid)
         library.reset()
 
-    def _upload(self, client, route="/papers"):
-        with open(self.pdf, "rb") as f:
-            return client.post(route, data={"file": (io.BytesIO(f.read()), "paper.pdf")},
-                               content_type="multipart/form-data")
+    def _upload(self, client, route="/papers", pdf=None):
+        """Upload, then follow the background job the way the browser does. Returns the finished job's
+        result wrapped like a response (status_code, get_json)."""
+        with open(pdf or self.pdf, "rb") as f:
+            res = client.post(route, data={"file": (io.BytesIO(f.read()), "paper.pdf")},
+                              content_type="multipart/form-data")
+        if res.status_code != 202:
+            return res
+        job_id = res.get_json()["job_id"]
+        for _ in range(200):
+            job = client.get(f"/api/jobs/{job_id}").get_json()
+            if job["status"] != "running":
+                break
+            time.sleep(0.05)
+        self.last_job = job
+        result = job.get("result") if job["status"] == "done" else {"error": job.get("error")}
+        return SimpleNamespace(status_code=200 if job["status"] == "done" else 400, get_json=lambda: result)
 
     def test_cookie_is_issued_once_and_is_http_only(self):
         client = app.test_client()
@@ -223,6 +244,68 @@ class TestAppSessions(unittest.TestCase):
         client.post("/api/figures/fig2/explain", json={})
         self.assertIn("Architecture of FlowNet-X", seen[0])
         self.assertIn("Forecast error versus prediction horizon", seen[1])
+
+    def test_upload_runs_in_the_background_and_reports_progress(self):
+        client = app.test_client()
+        stages = []
+
+        def slow_load(path, filename="", paper_id=None, progress=None):
+            def spy(message):
+                stages.append(message)
+                progress(message)
+            time.sleep(0.3)                       # the upload request must not wait for this
+            return load_paper(path, filename, paper_id, encoder=hash_encoder, progress=spy)
+
+        with patch("src.app.load_paper", slow_load):
+            with open(self.pdf, "rb") as f:
+                start = time.time()
+                res = client.post("/upload", data={"file": (io.BytesIO(f.read()), "paper.pdf")},
+                                  content_type="multipart/form-data")
+                answered_in = time.time() - start
+            self.assertEqual(res.status_code, 202)
+            self.assertLess(answered_in, 0.25)
+            job_id = res.get_json()["job_id"]
+            seen = set()
+            for _ in range(200):
+                job = client.get(f"/api/jobs/{job_id}").get_json()
+                seen.add(job["stage"])
+                if job["status"] != "running":
+                    break
+                time.sleep(0.02)
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual(job["result"]["stats"]["pages"], 3)
+        self.assertIn("Reading the layout of page 1 of 3", stages)
+        self.assertIn("Finding figures and their captions", stages)
+        self.assertTrue(any(s.startswith("Building the search index") for s in stages))
+        self.assertEqual(len(client.get("/papers").get_json()["papers"]), 1)       # added to this browser's library
+
+    def test_job_status_is_private_to_its_browser_and_lost_jobs_say_so(self):
+        alice, bob = app.test_client(), app.test_client()
+        with patch("src.app.load_paper", _offline_load_paper):
+            with open(self.pdf, "rb") as f:
+                job_id = alice.post("/papers", data={"file": (io.BytesIO(f.read()), "p.pdf")},
+                                    content_type="multipart/form-data").get_json()["job_id"]
+            for _ in range(200):
+                if alice.get(f"/api/jobs/{job_id}").get_json()["status"] != "running":
+                    break
+                time.sleep(0.02)
+        self.assertEqual(bob.get(f"/api/jobs/{job_id}").status_code, 404)
+        lost = alice.get("/api/jobs/unknown-job")
+        self.assertEqual(lost.status_code, 404)
+        self.assertIn("upload again", lost.get_json()["error"])
+
+    def test_a_pdf_without_text_fails_cleanly_in_the_job(self):
+        blank = os.path.join(self.tmp, "blank.pdf")
+        doc = fitz.open()
+        doc.new_page()
+        doc.save(blank)
+        doc.close()
+        pdfs = lambda: {f for f in os.listdir("uploads") if f.endswith(".pdf")} if os.path.isdir("uploads") else set()
+        before = pdfs()
+        res = self._upload(app.test_client(), "/upload", pdf=blank)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("No text could be extracted", res.get_json()["error"])
+        self.assertEqual(pdfs(), before)                                         # the file was removed again
 
     def test_non_pdf_content_is_rejected_and_not_left_on_disk(self):
         client = app.test_client()
