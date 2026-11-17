@@ -9,7 +9,8 @@ from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from src.config import GROQ_API_KEY, TEXT_MODELS, VISION_MODEL, LLM_MAX_TOKENS, MAX_LLM_CALLS_PER_RUN
+from src.config import (GROQ_API_KEY, TEXT_MODELS, VISION_MODEL, LLM_MAX_TOKENS, MAX_LLM_CALLS_PER_RUN,
+                        OPENAI_API_KEY, OPENAI_MODELS, OPENAI_VISION_MODEL, LLM_PROVIDER)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -159,12 +160,111 @@ def groq_backend(messages, tools=None, json_mode=False, max_tokens=LLM_MAX_TOKEN
         f"All models are currently rate-limited or unavailable. Please wait a few minutes. ({last_err[:120]})"
     )
 
-_backend: Backend = groq_backend
+# =========================
+# OPENAI
+# =========================
+_openai_client = None
+OPENAI_REASONING_HEADROOM = 2500      # GPT-5 models reason first; that counts against max_completion_tokens
+
+def get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        if not OPENAI_API_KEY:
+            raise LLMError("OPENAI_API_KEY is not set.")
+        from openai import OpenAI
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY, max_retries=1, timeout=120)
+    return _openai_client
+
+def _openai_request(model: str, messages, tools, json_mode: bool, max_tokens: int) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"model": model, "messages": messages,
+                              "max_completion_tokens": max_tokens + OPENAI_REASONING_HEADROOM}
+    if model.startswith(("gpt-5", "o")):
+        kwargs["reasoning_effort"] = "low"          # cheaper and faster; plenty for reading a paper
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    return kwargs
+
+def _openai_account_problem(err: str) -> bool:
+    """Errors another OpenAI model will not fix: no credit, bad key, no access."""
+    e = err.lower()
+    return any(k in e for k in ("insufficient_quota", "invalid_api_key", "incorrect api key", "401",
+                                "billing", "exceeded your current quota"))
+
+def openai_backend(messages, tools=None, json_mode=False, max_tokens=LLM_MAX_TOKENS):
+    """Call OpenAI, falling back to the next OpenAI model on rate limits or a cut-off answer."""
+    client = get_openai_client()
+    last_err = ""
+    for model in OPENAI_MODELS:
+        for budget in (max_tokens, max_tokens * 2):
+            try:
+                res = client.chat.completions.create(**_openai_request(model, messages, tools, json_mode, budget))
+            except Exception as e:
+                last_err = str(e)
+                if _openai_account_problem(last_err):
+                    raise LLMError(f"OpenAI: {last_err[:300]}") from e
+                if type(e).__name__ in ("APIConnectionError", "APITimeoutError") or _is_retryable(last_err):
+                    print(f"[LLM fallback] {model} failed ({last_err[:80]}), trying next model...")
+                    break
+                raise LLMError(f"{model}: {last_err[:300]}") from e
+            choice = res.choices[0]
+            msg = choice.message
+            if choice.finish_reason == "length" and not (msg.content or msg.tool_calls):
+                last_err = "max completion tokens reached"
+                print(f"[LLM] {model} ran out of tokens at {budget}")
+                continue                                  # retry once with twice the room
+            tool_calls = []
+            for tc in (msg.tool_calls or []):
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls.append({"id": tc.id, "name": tc.function.name, "arguments": args})
+            tokens = getattr(getattr(res, "usage", None), "total_tokens", 0) or 0
+            return {"content": msg.content or "", "tool_calls": tool_calls, "tokens": tokens}
+    if _ran_out_of_tokens(last_err):
+        raise LLMError("The model's answer was too long and got cut off. Please try again.")
+    raise LLMRateLimitError(f"OpenAI is rate-limited or unavailable right now. ({last_err[:120]})")
+
+# =========================
+# PROVIDER CHOICE
+# =========================
+def _providers() -> List[str]:
+    """Order in which providers are tried. The second one is a backup when the first fails."""
+    have = {"openai": bool(OPENAI_API_KEY), "groq": bool(GROQ_API_KEY)}
+    if LLM_PROVIDER in ("openai", "groq"):
+        order = [LLM_PROVIDER, "groq" if LLM_PROVIDER == "openai" else "openai"]
+    else:
+        order = ["openai", "groq"]
+    usable = [p for p in order if have[p]]
+    return usable or ["groq"]                       # groq_backend raises a clear "key not set" error
+
+def default_backend(messages, tools=None, json_mode=False, max_tokens=LLM_MAX_TOKENS):
+    errors = []
+    for provider in _providers():
+        fn = openai_backend if provider == "openai" else groq_backend
+        try:
+            return fn(messages, tools, json_mode, max_tokens)
+        except LLMBudgetExceeded:
+            raise
+        except LLMError as e:
+            errors.append(e)
+            print(f"[LLM] {provider} failed: {str(e)[:160]}")
+    if len(errors) == 1:
+        raise errors[0]
+    raise type(errors[-1])(" | ".join(str(e)[:200] for e in errors))
+
+def active_provider() -> str:
+    return _providers()[0]
+
+_backend: Backend = default_backend
 
 def set_backend(backend: Optional[Backend]):
-    """Swap the LLM backend (used by tests to inject a fake LLM). Pass None to restore Groq."""
+    """Swap the LLM backend (used by tests to inject a fake LLM). Pass None to restore the default."""
     global _backend
-    _backend = backend or groq_backend
+    _backend = backend or default_backend
 
 # =========================
 # PUBLIC API
@@ -248,25 +348,30 @@ def vision(img_path: str, prompt: str, max_tokens: int = 900) -> str:
     _count_call()
     if _vision_backend is not None:
         return _vision_backend(img_path, prompt, max_tokens)
-    try:
-        client = get_client()
-        mime = _MIME.get(img_path.rsplit(".", 1)[-1].lower(), "image/png")
-        res = client.chat.completions.create(
-            model=VISION_MODEL,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encode_image(img_path)}"}},
-            ]}],
-        )
-        text = (res.choices[0].message.content or "").strip()
-    except LLMError:
-        raise
-    except Exception as e:
-        err = str(e)
-        if "429" in err or "rate_limit" in err.lower():
-            raise LLMRateLimitError(f"The vision model is rate-limited right now: {err[:160]}") from e
-        raise LLMError(f"The vision model could not read the image: {err[:200]}") from e
-    if not text:
-        raise LLMError("The vision model returned an empty answer.")
-    return text
+    mime = _MIME.get(img_path.rsplit(".", 1)[-1].lower(), "image/png")
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encode_image(img_path)}"}},
+    ]}]
+    errors: List[LLMError] = []
+    for provider in _providers():
+        try:
+            if provider == "openai":
+                res = get_openai_client().chat.completions.create(
+                    model=OPENAI_VISION_MODEL, messages=messages, reasoning_effort="low",
+                    max_completion_tokens=max_tokens + OPENAI_REASONING_HEADROOM)
+            else:
+                res = get_client().chat.completions.create(model=VISION_MODEL, max_tokens=max_tokens, messages=messages)
+            text = (res.choices[0].message.content or "").strip()
+            if text:
+                return text
+            errors.append(LLMError("The vision model returned an empty answer."))
+        except LLMError as e:
+            errors.append(e)
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "rate_limit" in err.lower():
+                errors.append(LLMRateLimitError(f"The vision model is rate-limited right now: {err[:160]}"))
+            else:
+                errors.append(LLMError(f"The vision model could not read the image: {err[:200]}"))
+    raise errors[-1]

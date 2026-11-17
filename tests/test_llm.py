@@ -190,3 +190,68 @@ class TestReasoningBudget(unittest.TestCase):
             ctx = study.study_context(type("P", (), {"id": "x"})())
         self.assertLessEqual(len(ctx), study.STUDY_CONTEXT_CHARS)
         self.assertTrue(ctx.rstrip().endswith("word"))
+
+
+class TestOpenAIProvider(unittest.TestCase):
+    """With OPENAI_API_KEY set, OpenAI answers first; Groq is the backup."""
+
+    def _client(self, outcomes):
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        calls = []
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            out = outcomes.pop(0)
+            if isinstance(out, Exception):
+                raise out
+            content, finish = out if isinstance(out, tuple) else (out, "stop")
+            msg = MagicMock(content=content, tool_calls=[])
+            return MagicMock(choices=[MagicMock(message=msg, finish_reason=finish)], usage=MagicMock(total_tokens=5))
+        client.chat.completions.create.side_effect = create
+        return client, calls
+
+    def test_openai_is_used_first_with_reasoning_room(self):
+        from unittest.mock import patch
+        from src import llm as m
+        client, calls = self._client(['{"a": 1}'])
+        with patch.object(m, "OPENAI_API_KEY", "sk-test"), patch.object(m, "GROQ_API_KEY", "gsk"), \
+                patch.object(m, "LLM_PROVIDER", "auto"), patch.object(m, "get_openai_client", return_value=client), \
+                patch.object(m, "groq_backend", side_effect=AssertionError("groq must not be called")):
+            out = m.default_backend([{"role": "user", "content": "x"}], json_mode=True, max_tokens=2400)
+            self.assertEqual(m.active_provider(), "openai")
+        self.assertEqual(out["content"], '{"a": 1}')
+        self.assertEqual(calls[0]["model"], "gpt-5-mini")
+        self.assertEqual(calls[0]["max_completion_tokens"], 2400 + m.OPENAI_REASONING_HEADROOM)
+        self.assertEqual(calls[0]["reasoning_effort"], "low")
+        self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
+        self.assertNotIn("max_tokens", calls[0])
+
+    def test_cut_off_answer_is_retried_with_more_room(self):
+        from unittest.mock import patch
+        from src import llm as m
+        client, calls = self._client([("", "length"), "done"])
+        with patch.object(m, "OPENAI_API_KEY", "sk-test"), patch.object(m, "get_openai_client", return_value=client):
+            out = m.openai_backend([{"role": "user", "content": "x"}], max_tokens=1000)
+        self.assertEqual(out["content"], "done")
+        self.assertEqual(calls[1]["max_completion_tokens"], 2000 + m.OPENAI_REASONING_HEADROOM)
+
+    def test_no_credit_falls_back_to_groq(self):
+        from unittest.mock import patch
+        from src import llm as m
+        client, calls = self._client([Exception("Error code: 429 - {'error': {'code': 'insufficient_quota'}}")])
+        with patch.object(m, "OPENAI_API_KEY", "sk-test"), patch.object(m, "GROQ_API_KEY", "gsk"), \
+                patch.object(m, "LLM_PROVIDER", "auto"), patch.object(m, "get_openai_client", return_value=client), \
+                patch.object(m, "groq_backend", return_value={"content": "from groq", "tool_calls": []}):
+            out = m.default_backend([{"role": "user", "content": "x"}])
+        self.assertEqual(out["content"], "from groq")
+        self.assertEqual(len(calls), 1)                 # another OpenAI model would not have helped
+
+    def test_without_openai_key_groq_is_used(self):
+        from unittest.mock import patch
+        from src import llm as m
+        with patch.object(m, "OPENAI_API_KEY", ""), patch.object(m, "GROQ_API_KEY", "gsk"), \
+                patch.object(m, "LLM_PROVIDER", "auto"), \
+                patch.object(m, "groq_backend", return_value={"content": "groq", "tool_calls": []}):
+            self.assertEqual(m.active_provider(), "groq")
+            self.assertEqual(m.default_backend([{"role": "user", "content": "x"}])["content"], "groq")

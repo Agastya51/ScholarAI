@@ -8,6 +8,12 @@ load_dotenv()
 # Keys pasted into a hosting dashboard often carry a trailing space, newline or quotes; any of them makes every
 # request fail with a bare "Connection error", so they are removed here.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip().strip("\"'").strip()
+# OpenAI (optional). When OPENAI_API_KEY is set, OpenAI answers first and Groq is the backup.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip().strip("\"'").strip()
+OPENAI_MODELS = [m.strip() for m in os.environ.get("OPENAI_MODELS", "gpt-5-mini,gpt-5-nano").split(",") if m.strip()]
+OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-5-mini")
+# "auto": OpenAI if its key is set, else Groq.  "openai" / "groq": only that provider (plus the other as backup).
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "auto").strip().lower()
 
 def _flag(name: str, default: bool) -> bool:
     return os.environ.get(name, str(default)).lower() in ("true", "1", "t", "yes", "on")

@@ -241,7 +241,7 @@ The tests use a scripted fake LLM and a toy embedder, so they need no Groq key. 
 
 1. Push the repository to GitHub.
 2. Create a **Web Service** from the repo. Build command: `pip install -r requirements.txt`. Start command (the same as in `Procfile`): `gunicorn --workers 1 --threads 1 --timeout 600 --bind 0.0.0.0:$PORT src.app:app`.
-3. Set environment variables: `GROQ_API_KEY` (required), `FLASK_DEBUG=False`. `PORT` is provided by the host.
+3. Set environment variables: `GROQ_API_KEY`, and optionally `OPENAI_API_KEY`, plus `FLASK_DEBUG=False`. `PORT` is provided by the host. With an OpenAI key, `gpt-5-mini` (then `gpt-5-nano`) answers first, at low reasoning effort to keep costs down, and Groq is the backup when OpenAI fails or the credit runs out. `LLM_PROVIDER=groq` or `openai` forces one provider first; `OPENAI_MODELS` changes the OpenAI models.
 4. Set the health-check path to `/health`.
 
 Things to know:

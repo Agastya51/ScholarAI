@@ -76,6 +76,10 @@ function friendlyError(message) {
   const m = String(message);
   if (/rate.?limit|429/i.test(m)) return "The language model is busy (rate limit). Wait about a minute and try again.";
   if (/budget/i.test(m)) return "This request needed more model calls than allowed. Try a narrower request.";
+  if (/insufficient_quota|exceeded your current quota|billing/i.test(m))
+    return "The OpenAI account has run out of credit. Add credit on platform.openai.com, or remove OPENAI_API_KEY on the server to use Groq only.";
+  if (/OpenAI: .*(invalid_api_key|Incorrect API key|401)/i.test(m))
+    return "The server's OpenAI key was rejected. Check OPENAI_API_KEY under Environment on Render.";
   if (/Could not connect to Groq|Connection error/i.test(m))
     return "The server could not reach the language model (Groq). Try again in a moment. If it keeps happening, check GROQ_API_KEY in the server settings for spaces or line breaks.";
   if (/GROQ_API_KEY|api key|401/i.test(m))
