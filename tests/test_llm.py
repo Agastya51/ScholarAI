@@ -122,3 +122,71 @@ class TestKeyAndConnectionErrors(unittest.TestCase):
                 llm_module.groq_backend([{"role": "user", "content": "hi"}])
         self.assertIn("Could not connect to Groq", str(ctx.exception))
         self.assertIn("Illegal header value", str(ctx.exception))
+
+
+class TestReasoningBudget(unittest.TestCase):
+    """gpt-oss reasons before answering; that must not eat the answer's budget (json_validate_failed)."""
+
+    def _client(self, outcomes):
+        from unittest.mock import MagicMock
+        client = MagicMock()
+        calls = []
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            out = outcomes.pop(0)
+            if isinstance(out, Exception):
+                raise out
+            msg = MagicMock(content=out, tool_calls=[])
+            return MagicMock(choices=[MagicMock(message=msg)], usage=MagicMock(total_tokens=10))
+        client.chat.completions.create.side_effect = create
+        return client, calls
+
+    def test_reasoning_model_gets_headroom_and_low_effort_for_json(self):
+        from unittest.mock import patch
+        from src import llm as m
+        client, calls = self._client(['{"a": 1}'])
+        with patch.object(m, "get_client", return_value=client):
+            m.groq_backend([{"role": "user", "content": "x"}], json_mode=True, max_tokens=2400)
+        self.assertEqual(calls[0]["model"], "openai/gpt-oss-120b")
+        self.assertEqual(calls[0]["max_tokens"], 2400 + m.REASONING_HEADROOM)
+        self.assertEqual(calls[0]["extra_body"], {"reasoning_effort": "low"})
+
+    def test_cut_off_json_is_retried_bigger_then_falls_back(self):
+        from unittest.mock import patch
+        from src import llm as m
+        cut = Exception("Error code: 400 - {'error': {'code': 'json_validate_failed', 'failed_generation': "
+                        "'max completion tokens reached before generating a valid document'}}")
+        client, calls = self._client([cut, cut, '{"ok": true}'])
+        with patch.object(m, "get_client", return_value=client), patch.object(m.time, "sleep"):
+            out = m.groq_backend([{"role": "user", "content": "x"}], json_mode=True, max_tokens=1000)
+        self.assertEqual(out["content"], '{"ok": true}')
+        self.assertEqual([c["model"] for c in calls], ["openai/gpt-oss-120b", "openai/gpt-oss-120b",
+                                                        "llama-3.3-70b-versatile"])
+        self.assertEqual(calls[1]["max_tokens"], 2000 + m.REASONING_HEADROOM)
+        self.assertNotIn("extra_body", calls[2])
+
+    def test_other_errors_are_not_retried(self):
+        from unittest.mock import patch
+        from src import llm as m
+        client, calls = self._client([Exception("Error code: 400 - invalid model")])
+        with patch.object(m, "get_client", return_value=client):
+            with self.assertRaises(m.LLMError):
+                m.groq_backend([{"role": "user", "content": "x"}])
+        self.assertEqual(len(calls), 1)
+
+    def test_request_fits_under_the_free_plan_token_limit(self):
+        from src import llm as m
+        prompt = [{"role": "system", "content": "s" * 2000}, {"role": "user", "content": "w" * 12000}]   # ~4,100 tokens
+        req = m._request("openai/gpt-oss-120b", prompt, None, True, 2400)
+        self.assertLessEqual(m._prompt_tokens(prompt) + req["max_tokens"], m.GROQ_TPM_LIMIT)
+        self.assertGreaterEqual(req["max_tokens"], 2400 + 300)        # the answer keeps its budget
+
+    def test_study_context_is_capped_on_a_passage_boundary(self):
+        from unittest.mock import patch
+        from src import study
+        long = "\n\n".join(f"[p. {i}] " + "word " * 300 for i in range(20))
+        with patch.object(study, "gather_context", return_value=long):
+            ctx = study.study_context(type("P", (), {"id": "x"})())
+        self.assertLessEqual(len(ctx), study.STUDY_CONTEXT_CHARS)
+        self.assertTrue(ctx.rstrip().endswith("word"))

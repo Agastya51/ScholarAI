@@ -25,8 +25,14 @@ STUDY_QUERIES = [
     "limitations future work conclusion",
 ]
 
+STUDY_CONTEXT_CHARS = 11000   # ~3,100 tokens: with the answer and reasoning room it stays under Groq's 8K/min
+
 def study_context(paper: Paper) -> str:
-    return gather_context(STUDY_QUERIES, k=3, paper_id=paper.id)
+    text = gather_context(STUDY_QUERIES, k=3, paper_id=paper.id)
+    if len(text) <= STUDY_CONTEXT_CHARS:
+        return text
+    cut = text.rfind("\n\n", 0, STUDY_CONTEXT_CHARS)        # end on a whole passage
+    return text[:cut if cut > STUDY_CONTEXT_CHARS // 2 else STUDY_CONTEXT_CHARS]
 
 # =========================
 # QUOTE VERIFICATION (no LLM)
@@ -108,7 +114,7 @@ Rules: use ONLY the context. Copy evidence exactly (it will be checked against t
 Never invent numbers.
 
 Context:
-{study_context(paper)}""", Insights, max_tokens=2200)
+{study_context(paper)}""", Insights, max_tokens=2400)
 
     claims = []
     for c in out.claims[:8]:

@@ -1,6 +1,7 @@
 import base64
 import contextvars
 import json
+import os
 import re
 import time
 from contextlib import contextmanager
@@ -76,24 +77,62 @@ def _is_retryable(err: str) -> bool:
     e = err.lower()
     return "429" in e or "rate_limit" in e or "tool_use_failed" in e or "503" in e or "over capacity" in e
 
+# gpt-oss models reason before answering, and the reasoning counts against the completion limit. Callers give the
+# budget for the ANSWER; reasoning models get extra room on top, and JSON calls reason briefly. Without this, long
+# JSON (claims, flashcards, quiz) ran out of tokens mid-document and Groq rejected it with json_validate_failed.
+# Groq's free plan allows gpt-oss-120b 8,000 tokens per minute and refuses a single request whose prompt plus
+# max_tokens is larger, so the extra room is fitted under that limit (GROQ_TPM_LIMIT on a paid plan).
+REASONING_HEADROOM = 1500
+GROQ_TPM_LIMIT = int(os.environ.get("GROQ_TPM_LIMIT", 8000))
+
+def _is_reasoning_model(model: str) -> bool:
+    return model.startswith("openai/gpt-oss")
+
+def _prompt_tokens(messages) -> int:
+    """Rough token count of a prompt (about 3.5 characters per token for English and numbers)."""
+    chars = sum(len(m.get("content") or "") if isinstance(m.get("content"), str) else 2000 for m in messages)
+    return int(chars / 3.5) + 50 * len(messages)
+
+def _request(model: str, messages, tools, json_mode: bool, max_tokens: int) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"model": model, "messages": messages, "max_tokens": max_tokens}
+    if _is_reasoning_model(model):
+        wanted = max_tokens + REASONING_HEADROOM
+        room = GROQ_TPM_LIMIT - _prompt_tokens(messages) - 300
+        # Only trim the reasoning room, never the answer's own budget
+        kwargs["max_tokens"] = min(wanted, room) if room >= max_tokens + 300 else wanted
+        kwargs["extra_body"] = {"reasoning_effort": "low" if json_mode else "medium"}
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    return kwargs
+
+def _ran_out_of_tokens(err: str) -> bool:
+    e = err.lower()
+    return "json_validate_failed" in e or "max completion tokens" in e or ("max_tokens" in e and "reached" in e)
+
 def groq_backend(messages, tools=None, json_mode=False, max_tokens=LLM_MAX_TOKENS):
-    """Call Groq with automatic model fallback on rate-limit (429) and tool-call failures."""
+    """Call Groq with automatic model fallback on rate-limit (429), tool-call failures and truncated JSON."""
     client = get_client()
     last_err = ""
     for model in TEXT_MODELS:
-        kwargs: Dict[str, Any] = {"model": model, "messages": messages, "max_tokens": max_tokens}
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-        try:
-            res = client.chat.completions.create(**kwargs)
-        except Exception as e:
-            last_err = str(e)
-            if _is_retryable(last_err):
+        res, error = None, None
+        for budget in (max_tokens, max_tokens * 2):          # one retry with twice the room if the answer was cut off
+            try:
+                res = client.chat.completions.create(**_request(model, messages, tools, json_mode, budget))
+                break
+            except Exception as exc:
+                error, last_err = exc, str(exc)
+                if not _ran_out_of_tokens(last_err):
+                    break
+                print(f"[LLM] {model} ran out of tokens at {budget}")
+        if res is None:
+            e = error
+            if _is_retryable(last_err) or _ran_out_of_tokens(last_err):
                 print(f"[LLM fallback] {model} failed ({last_err[:80]}), trying next model...")
-                time.sleep(2)
+                if _is_retryable(last_err):
+                    time.sleep(2)
                 continue
             if type(e).__name__ == "APIConnectionError":
                 cause = e.__cause__ or e.__context__
@@ -114,6 +153,8 @@ def groq_backend(messages, tools=None, json_mode=False, max_tokens=LLM_MAX_TOKEN
         tokens = getattr(getattr(res, "usage", None), "total_tokens", 0) or 0
         return {"content": msg.content or "", "tool_calls": tool_calls, "tokens": tokens}
 
+    if _ran_out_of_tokens(last_err):
+        raise LLMError("The model's answer was too long and got cut off. Please try again.")
     raise LLMRateLimitError(
         f"All models are currently rate-limited or unavailable. Please wait a few minutes. ({last_err[:120]})"
     )
