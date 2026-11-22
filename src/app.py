@@ -10,7 +10,8 @@ from functools import wraps
 from flask import Flask, request, jsonify, send_file, render_template, Response, g
 
 from src.config import (
-    UPLOAD_DIR, FIGURE_DIR, MAX_LLM_CALLS_PER_RUN, MAX_UPLOAD_MB, MAX_PDF_PAGES, SESSION_ISOLATION, SESSION_TTL_SECONDS
+    UPLOAD_DIR, FIGURE_DIR, MAX_LLM_CALLS_PER_RUN, MAX_UPLOAD_MB, MAX_PDF_PAGES, SESSION_ISOLATION, SESSION_TTL_SECONDS,
+    DEFAULT_TOP_K,
 )
 from src import study
 from src.figures import explain_figure, explain_paper_figure, public_figure
@@ -314,6 +315,68 @@ def ask():
                 "retrieval": result.get("retrieval", {}), "trace": result.get("trace", []), "mode": "simple"}
     result = answer_question(query, history=data.get("history"))
     return {**result, "mode": "agent"}
+
+EVAL_CONFIGS = ["bm25", "dense", "hybrid", "hybrid+mmr", "pipeline"]
+EVAL_MODES = ("simple", "naive")
+
+@app.route("/api/eval/question", methods=["POST"])
+@agent_endpoint
+def eval_question():
+    """Score ONE benchmark question on the open paper with the deployed models, using the metric code in evals/.
+
+    Body: {question, expected_facts: [...], answerable: bool, modes: ["simple", "naive"], judge: bool}.
+    Returns retrieval metrics for each retrieval setting (no model calls), answer metrics for each mode, and,
+    with judge, an LLM verdict on the full pipeline's answer. One question per request keeps every request
+    inside the normal call budget; the caller loops over the question set and averages."""
+    from evals.metrics import (answer_metrics, chunk_is_relevant, context_recall, facts_of, is_answerable,
+                               norm, retrieval_metrics)
+    from evals.pipelines import run_pipeline
+    from evals.retrieval_eval import CONFIGS
+    from evals.run_eval import judge
+
+    data = _json()
+    paper = library.active()
+    if paper is None:
+        raise ValueError("Open a paper first.")
+    question = str(data.get("question", "")).strip()
+    if not question:
+        raise ValueError("No question provided")
+    item = {"question": question, "expected_facts": [str(f) for f in data.get("expected_facts") or []],
+            "answerable": bool(data.get("answerable", True))}
+    out = {"question": question, "answerable": is_answerable(item), "paper": paper.title or paper.filename,
+           "chunks_in_index": len(paper.chunks)}
+
+    if is_answerable(item):
+        # A question whose answer key is not in the parsed text (another PDF version, a typo) is reported, not scored
+        text = norm(paper.text)
+        out["valid"] = all(norm(f) in text for f in facts_of(item))
+        out["retrieval"] = {name: retrieval_metrics(CONFIGS[name](paper, question, DEFAULT_TOP_K), item)
+                            for name in EVAL_CONFIGS}
+    # Similarity scores for threshold calibration
+    scores = paper.store.dense_scores(question)
+    if len(scores):
+        out["best_score"] = round(float(scores.max()), 4)
+        if is_answerable(item):
+            flags = [chunk_is_relevant(meta, item) for meta in paper.store.metadata]
+            rel = [float(x) for x, ok in zip(scores, flags) if ok]
+            other = [float(x) for x, ok, meta in zip(scores, flags, paper.store.metadata)
+                     if not ok and meta.get("kind") != "reference"]
+            out["best_relevant_score"] = round(max(rel), 4) if rel else None
+            out["best_other_score"] = round(max(other), 4) if other else None
+
+    out["answers"] = {}
+    for mode in [m for m in data.get("modes", ["simple"]) if m in EVAL_MODES]:
+        res = run_pipeline(mode, paper, question)
+        contexts = res.pop("contexts")
+        pages = [c.get("page") for c in contexts if c.get("page")]
+        row = {**res, **answer_metrics(res["answer"], item, paper.text, pages)}
+        if is_answerable(item):
+            row["context_recall"] = context_recall(contexts, item)
+        if data.get("judge") and mode == "simple" and res["answer"]:
+            row.update(judge(question, res["answer"], contexts, item) or {})
+        row["answer"] = str(res["answer"])[:600]
+        out["answers"][mode] = row
+    return out
 
 @app.route("/compare", methods=["POST"])
 @agent_endpoint

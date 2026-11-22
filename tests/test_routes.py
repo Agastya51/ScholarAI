@@ -108,3 +108,58 @@ class TestAppRoutes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEvalEndpoint(unittest.TestCase):
+    """/api/eval/question scores one question with the metric code in evals/."""
+
+    def setUp(self):
+        app.config["SESSION_ISOLATION"] = False
+        self.client = app.test_client()
+        library.reset()
+
+    def tearDown(self):
+        set_backend(None)
+        library.reset()
+
+    def test_needs_a_paper(self):
+        res = self.client.post("/api/eval/question", json={"question": "x"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_scores_retrieval_answers_and_judge(self):
+        make_paper()
+
+        def responder(messages, tools, json_mode):
+            if json_mode and any("grading a question-answering system" in str(m["content"]) for m in messages):
+                return {"claims": [{"claim": "MAE drops 8.1%", "supported": True}], "relevance": 5, "correctness": 5}
+            if json_mode:
+                return {"rewrites": [], "hypothetical_answer": ""}
+            return "MAE drops 8.1% on PEMS-BAY [p. 5]."
+
+        set_backend(FakeLLM(responder))
+        data = self.client.post("/api/eval/question", json={
+            "question": "How much does MAE drop on PEMS-BAY?", "expected_facts": ["8.1%"],
+            "modes": ["simple", "naive"], "judge": True}).get_json()
+        self.assertTrue(data["answerable"])
+        self.assertIn("valid", data)
+        self.assertEqual(set(data["retrieval"]), {"bm25", "dense", "hybrid", "hybrid+mmr", "pipeline"})
+        for m in data["retrieval"].values():
+            self.assertTrue({"hit", "mrr", "precision", "ndcg", "context_recall"} <= set(m))
+        simple = data["answers"]["simple"]
+        self.assertEqual(simple["fact_recall"], 1.0)
+        self.assertEqual(simple["cited"], 1.0)
+        self.assertEqual(simple["correctness"], 1.0)
+        self.assertEqual(simple["faithfulness"], 1.0)
+        self.assertIn("naive", data["answers"])
+        self.assertNotIn("correctness", data["answers"]["naive"])
+
+    def test_unanswerable_question_scores_abstention_only(self):
+        make_paper()
+        set_backend(FakeLLM(lambda m, t, j: {"rewrites": [], "hypothetical_answer": ""} if j
+                            else "The paper does not mention ImageNet results."))
+        data = self.client.post("/api/eval/question", json={
+            "question": "What ImageNet accuracy is reported?", "expected_facts": [], "answerable": False}).get_json()
+        self.assertFalse(data["answerable"])
+        self.assertNotIn("retrieval", data)
+        self.assertEqual(data["answers"]["simple"]["abstained"], 1.0)
+        self.assertNotIn("fact_recall", data["answers"]["simple"])
